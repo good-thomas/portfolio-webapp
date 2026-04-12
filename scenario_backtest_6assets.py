@@ -217,10 +217,11 @@ def prepare_asset_returns(managed_futures_csv: str | None = None) -> pd.DataFram
     if managed_futures_csv:
         mf_nav = load_managed_futures_csv(managed_futures_csv)
         returns["managed_futures"] = quarterly_returns_from_price(mf_nav)
-    else:
-        print(
-            "WARNUNG: Keine Managed-Futures-CSV angegeben. "
-            "Die Assetklasse 'managed_futures' wird nicht berücksichtigt."
+else:
+    print("INFO: Verwende DBMF als Managed-Futures-Proxy")
+
+    mf_price = load_price_series_from_yf("DBMF", START_DATE, END_DATE)
+    returns["managed_futures"] = quarterly_returns_from_price(mf_price)
         )
 
     df = pd.concat(returns, axis=1)

@@ -194,12 +194,12 @@ def load_managed_futures_csv(path: str | Path) -> pd.Series:
     raise ValueError("CSV braucht entweder Spalte 'Return' oder 'Close'")
 
 def quarterly_returns_from_price(price: pd.Series) -> pd.Series:
-    q = price.resample("Q").last().dropna()
+    q = price.resample("QE").last().dropna()
     return q.pct_change().dropna()
 
 def quarterly_cash_returns_from_irx(irx_yield: pd.Series) -> pd.Series:
     # ^IRX ist annualisierte T-Bill-Yield in Prozent
-    q = irx_yield.resample("Q").last().dropna()
+    q = irx_yield.resample("QE").last().dropna()
     ret = (q / 100.0) / 4.0
     ret.name = "cash"
     return ret.dropna()

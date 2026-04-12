@@ -26,25 +26,32 @@ def root():
 
 @app.post("/api/backtest")
 def run_backtest(req: BacktestRequest):
-    settings = DEFAULT_SETTINGS.copy()
-    settings["signal_accuracy"] = req.signal_accuracy
-    settings["top_n_assets"] = req.top_n_assets
-    settings["risk_target_ratio"] = req.risk_target_ratio
-    settings["n_simulations"] = req.n_simulations
-    settings["random_seed"] = 42
-    settings["transaction_cost_bps"] = 10
+    try:
+        settings = DEFAULT_SETTINGS.copy()
+        settings["signal_accuracy"] = req.signal_accuracy
+        settings["top_n_assets"] = req.top_n_assets
+        settings["risk_target_ratio"] = req.risk_target_ratio
+        settings["n_simulations"] = req.n_simulations
+        settings["random_seed"] = 42
+        settings["transaction_cost_bps"] = 10
 
-    asset_returns = prepare_asset_returns()
-    result = run_simulation_engine(asset_returns, settings)
+        asset_returns = prepare_asset_returns()
+        result = run_simulation_engine(asset_returns, settings)
 
-    portfolio = result.portfolio_paths.median(axis=1)
-    benchmark = result.benchmark_path.reindex(portfolio.index)
+        portfolio = result.portfolio_paths.median(axis=1)
+        benchmark = result.benchmark_path.reindex(portfolio.index)
 
-    return {
-        "summary": result.summary.to_dict(orient="records"),
-        "chart": {
-            "dates": [str(d.date()) for d in portfolio.index],
-            "portfolio_median": [None if pd.isna(x) else float(x) for x in portfolio],
-            "benchmark": [None if pd.isna(x) else float(x) for x in benchmark]
+        return {
+            "summary": result.summary.to_dict(orient="records"),
+            "chart": {
+                "dates": [str(d.date()) for d in portfolio.index],
+                "portfolio_median": [None if pd.isna(x) else float(x) for x in portfolio],
+                "benchmark": [None if pd.isna(x) else float(x) for x in benchmark]
+            }
         }
-    }
+
+    except Exception as e:
+        return {
+            "error": True,
+            "detail": str(e)
+        }

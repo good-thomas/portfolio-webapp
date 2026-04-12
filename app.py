@@ -18,7 +18,7 @@ class BacktestRequest(BaseModel):
     signal_accuracy: float = 0.8
     top_n_assets: int = 3
     risk_target_ratio: float = 0.9
-    n_simulations: int = 100
+    n_simulations: int = 10
 
 @app.get("/")
 def root():

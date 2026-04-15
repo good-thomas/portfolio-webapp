@@ -28,20 +28,30 @@ BENCHMARK_WEIGHTS = {"equities": 0.70, "bonds": 0.30}
 def load_data():
     returns = {}
     for asset, ticker in DEFAULT_TICKERS.items():
+        print(f"Lade Daten für {asset} ({ticker})...")
         data = yf.download(ticker, start=START_DATE, auto_adjust=True, progress=False)
-        if data.empty: continue
         
-        # Close Preise extrahieren
-        s = data.iloc[:, 0] if isinstance(data.columns, pd.MultiIndex) else data['Close']
+        if data.empty:
+            print(f"WARNUNG: Keine Daten für {ticker}")
+            continue
         
+        # Sicherstellen, dass wir nur eine flache Series bekommen
+        if isinstance(data.columns, pd.MultiIndex):
+            s = data['Close'][ticker]
+        else:
+            s = data['Close']
+            
         if asset == "cash":
-            # ^IRX ist annualisierte Rendite in %
             returns[asset] = (s.resample("QE").last() / 100.0) / 4.0
         else:
             returns[asset] = s.resample("QE").last().pct_change()
             
-    df = pd.concat(returns, axis=1).fillna(0.0)
-    return df.iloc[1:]
+    df = pd.concat(returns, axis=1)
+    
+    # CRITICAL FIX: Spaltennamen explizit setzen, falls concat sie verfälscht hat
+    df.columns = [col for col in returns.keys()]
+    
+    return df.dropna(how='all').fillna(0.0)
 
 # ------------------------------------------------------------
 # BACKTEST LOGIK

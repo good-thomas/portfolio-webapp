@@ -5,13 +5,12 @@ import pandas as pd
 import yfinance as yf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dataclasses import dataclass
 
 app = Flask(__name__)
-CORS(app)  # Erlaubt deinem Frontend den Zugriff auf die API
+CORS(app)
 
 # ------------------------------------------------------------
-# KONFIGURATION & DATENLADEN
+# KONFIGURATION
 # ------------------------------------------------------------
 START_DATE = "2000-01-01"
 DEFAULT_TICKERS = {
@@ -22,22 +21,17 @@ DEFAULT_TICKERS = {
     "cash": "^IRX",
     "crypto": "BTC-USD"
 }
-
 BENCHMARK_WEIGHTS = {"equities": 0.70, "bonds": 0.30}
 
 def load_data():
     returns = {}
     for asset, ticker in DEFAULT_TICKERS.items():
-        print(f"Lade Daten für {asset} ({ticker})...")
         data = yf.download(ticker, start=START_DATE, auto_adjust=True, progress=False)
+        if data.empty: continue
         
-        if data.empty:
-            print(f"WARNUNG: Keine Daten für {ticker}")
-            continue
-        
-        # Sicherstellen, dass wir nur eine flache Series bekommen
+        # Robustes Auslesen der Close-Preise
         if isinstance(data.columns, pd.MultiIndex):
-            s = data['Close'][ticker]
+            s = data.iloc[:, 0] 
         else:
             s = data['Close']
             
@@ -47,15 +41,8 @@ def load_data():
             returns[asset] = s.resample("QE").last().pct_change()
             
     df = pd.concat(returns, axis=1)
-    
-    # CRITICAL FIX: Spaltennamen explizit setzen, falls concat sie verfälscht hat
-    df.columns = [col for col in returns.keys()]
-    
+    df.columns = list(returns.keys())
     return df.dropna(how='all').fillna(0.0)
-
-# ------------------------------------------------------------
-# BACKTEST LOGIK
-# ------------------------------------------------------------
 
 def infer_pairwise_scores(next_returns, accuracy, rng, valid_assets):
     wins = pd.Series(0.0, index=valid_assets)
@@ -73,7 +60,6 @@ def run_simulation(asset_returns, settings):
     rng = np.random.default_rng(42)
     dates = asset_returns.index
     assets = asset_returns.columns.tolist()
-    
     all_sim_paths = []
     last_weights_df = None
 
@@ -81,24 +67,24 @@ def run_simulation(asset_returns, settings):
         nav = [1.0]
         nav_dates = [dates[0]]
         weight_records = []
-        
         window = 8
+        
         for t in range(window, len(dates) - 1):
             trailing = asset_returns.iloc[t-window:t]
             next_q = asset_returns.iloc[t+1]
-            
             trailing_vol = trailing.std(ddof=1).fillna(0)
             valid_now = trailing_vol[trailing_vol > 0.0001].index.tolist()
             
             scores = infer_pairwise_scores(next_q, settings['signal_accuracy'], rng, valid_now)
-            
             top_n = scores.nlargest(settings['top_n_assets']).index
+            
             target_w = pd.Series(0.0, index=assets)
             if len(top_n) > 0:
                 inv_vol = 1.0 / trailing_vol[top_n].replace(0, 0.01)
                 weights = (scores[top_n] + 1) * inv_vol
                 target_w[top_n] = weights / weights.sum()
             
+            # Risk Overlay gegen Benchmark (70/30)
             bench_vol = trailing[["equities", "bonds"]].mul(pd.Series(BENCHMARK_WEIGHTS), axis=1).sum(axis=1).std(ddof=1)
             port_vol = np.sqrt(target_w.values @ trailing.cov().fillna(0).values @ target_w.values)
             leverage = min(1.0, (bench_vol * settings['risk_target_ratio']) / port_vol) if port_vol > 0 else 1.0
@@ -112,17 +98,13 @@ def run_simulation(asset_returns, settings):
             nav_dates.append(dates[t+1])
             
             if sim_i == 0:
-                weight_records.append(final_w.to_dict())
-                weight_records[-1]['date'] = dates[t+1].strftime('%Y-%m-%d')
+                weight_records.append({**final_w.to_dict(), 'date': dates[t+1].strftime('%Y-%m-%d')})
         
         all_sim_paths.append(pd.Series(nav, index=nav_dates))
         if sim_i == 0:
             last_weights_df = weight_records
 
-    # ALLE PFADE ALS DATAFRAME ZURÜCKGEBEN
-    paths_df = pd.DataFrame(all_sim_paths).T.ffill()
-    
-    return paths_df, last_weights_df
+    return pd.DataFrame(all_sim_paths).T.ffill(), last_weights_df
 
 # ------------------------------------------------------------
 # API ENDPUNKTE
@@ -130,52 +112,56 @@ def run_simulation(asset_returns, settings):
 
 @app.route('/api/backtest', methods=['POST'])
 def backtest():
-    data = request.json
-    settings = {
-        'signal_accuracy': data.get('signal_accuracy', 0.8),
-        'top_n_assets': data.get('top_n_assets', 3),
-        'risk_target_ratio': data.get('risk_target_ratio', 0.9),
-        'n_simulations': data.get('n_simulations', 100)
-    }
-
-    df_returns = load_data()
-    # Erhält jetzt alle Pfade statt nur den Median
-    paths_df, weights_history = run_simulation(df_returns, settings)
-    
-    # Statistiken berechnen
-    portfolio_median = paths_df.median(axis=1)
-    portfolio_low = paths_df.quantile(0.1, axis=1)
-    portfolio_high = paths_df.quantile(0.9, axis=1)
-    
-    # Benchmark Pfad berechnen
-    bench_ret = df_returns[["equities", "bonds"]].mul(pd.Series(BENCHMARK_WEIGHTS), axis=1).sum(axis=1)
-    bench_nav = (1 + bench_ret[bench_ret.index >= portfolio_median.index[0]]).cumprod()
-    bench_nav = (bench_nav / bench_nav.iloc[0]) # Normalisieren auf 1.0
-
-    def get_summary_row(nav_series, label):
-        total_ret = nav_series.pct_change().dropna()
-        return {
-            "strategy": label,
-            "cagr": float((nav_series.iloc[-1]**(4/len(total_ret)))-1) if len(total_ret) > 0 else 0,
-            "ann_vol": float(total_ret.std() * math.sqrt(4)),
-            "max_drawdown": float((nav_series / nav_series.cummax() - 1).min()),
-            "sharpe": float((total_ret.mean() / total_ret.std()) * math.sqrt(4)) if total_ret.std() != 0 else 0
+    try:
+        data = request.json
+        settings = {
+            'signal_accuracy': data.get('signal_accuracy', 0.8),
+            'top_n_assets': data.get('top_n_assets', 3),
+            'risk_target_ratio': data.get('risk_target_ratio', 0.9),
+            'n_simulations': data.get('n_simulations', 20) # Reduziert für Speed
         }
 
-    # Tabelle mit zwei Zeilen
-    summary = [
-        get_summary_row(portfolio_median, "Portfolio (Median)"),
-        get_summary_row(bench_nav, "Benchmark 70/30")
-    ]
+        df_returns = load_data()
+        paths_df, weights_history = run_simulation(df_returns, settings)
+        
+        # Berechnungen für Chart & Tabelle
+        portfolio_median = paths_df.median(axis=1)
+        portfolio_low = paths_df.quantile(0.1, axis=1)
+        portfolio_high = paths_df.quantile(0.9, axis=1)
+        
+        bench_ret = df_returns[["equities", "bonds"]].mul(pd.Series(BENCHMARK_WEIGHTS), axis=1).sum(axis=1)
+        bench_nav = (1 + bench_ret[bench_ret.index >= portfolio_median.index[0]]).cumprod()
 
-    return jsonify({
-        "summary": summary,
-        "chart": {
-            "dates": [d.strftime('%Y-%m-%d') for d in portfolio_median.index],
-            "portfolio_median": portfolio_median.tolist(),
-            "portfolio_low": portfolio_low.tolist(),
-            "portfolio_high": portfolio_high.tolist(),
-            "benchmark": bench_nav.tolist()
-        },
-        "weights": weights_history
-    })
+        def get_stats(nav_series, label):
+            total_ret = nav_series.pct_change().dropna()
+            return {
+                "strategy": label,
+                "cagr": f"{((nav_series.iloc[-1]**(4/len(total_ret)))-1)*100:.1f} %",
+                "vola": f"{total_ret.std() * math.sqrt(4) * 100:.1f} %",
+                "max_dd": f"{(nav_series / nav_series.cummax() - 1).min() * 100:.1f} %",
+                "sharpe": round((total_ret.mean() / total_ret.std()) * math.sqrt(4), 2) if total_ret.std() != 0 else 0
+            }
+
+        # HIER WERDEN BEIDE ZEILEN ERZEUGT
+        summary = [
+            get_stats(portfolio_median, "Portfolio Median"),
+            get_stats(bench_nav, "Benchmark 70/30")
+        ]
+
+        return jsonify({
+            "summary": summary,
+            "chart": {
+                "dates": [d.strftime('%Y-%m-%d') for d in portfolio_median.index],
+                "portfolio_median": portfolio_median.tolist(),
+                "portfolio_low": portfolio_low.tolist(),
+                "portfolio_high": portfolio_high.tolist(),
+                "benchmark": bench_nav.tolist()
+            },
+            "weights": weights_history
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)

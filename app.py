@@ -1,4 +1,4 @@
-﻿from scenario_backtest_6assets import prepare_asset_returns, run_simulation_engine, DEFAULT_SETTINGS
+from scenario_backtest_6assets import prepare_asset_returns, run_simulation_engine, DEFAULT_SETTINGS
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# CORS-Einstellungen lassen wir so, damit deine Website zugreifen kann
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,11 +36,24 @@ def run_backtest(req: BacktestRequest):
         settings["random_seed"] = 42
         settings["transaction_cost_bps"] = 10
 
+        # Backtest starten
         asset_returns = prepare_asset_returns()
         result = run_simulation_engine(asset_returns, settings)
 
+        # Pfade für Chart vorbereiten
         portfolio = result.portfolio_paths.median(axis=1)
         benchmark = result.benchmark_path.reindex(portfolio.index)
+
+        # --- NEU: GEWICHTE FÜR DAS FRONTEND AUFBEREITEN ---
+        # Wir nehmen result.weights_last_run (das DataFrame mit den Quartalsgewichten)
+        weights_df = result.weights_last_run.reset_index()
+        # Datum in String umwandeln für JSON
+        weights_df['date'] = weights_df['index'].apply(lambda d: str(d.date()))
+        # Die Spalte 'index' entfernen, wir haben jetzt 'date'
+        weights_df = weights_df.drop(columns=['index'])
+        # In Liste von Dictionaries umwandeln
+        weights_history = weights_df.to_dict(orient="records")
+        # --------------------------------------------------
 
         return {
             "summary": result.summary.to_dict(orient="records"),
@@ -47,7 +61,8 @@ def run_backtest(req: BacktestRequest):
                 "dates": [str(d.date()) for d in portfolio.index],
                 "portfolio_median": [None if pd.isna(x) else float(x) for x in portfolio],
                 "benchmark": [None if pd.isna(x) else float(x) for x in benchmark]
-            }
+            },
+            "weights": weights_history  # Hier schicken wir die Daten an die Website
         }
 
     except Exception as e:

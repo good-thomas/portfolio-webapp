@@ -133,15 +133,33 @@ def backtest():
         bench_nav = (1 + bench_ret[bench_ret.index >= portfolio_median.index[0]]).cumprod()
 
         def get_stats(nav_series, label):
-            total_ret = nav_series.pct_change().dropna()
+            # 1. Renditen berechnen
+            rets = nav_series.pct_change().dropna()
+            if rets.empty:
+                return {"strategy": label, "cagr": "n.a.", "vola": "n.a.", "max_dd": "n.a.", "sharpe": 0}
+
+            # 2. CAGR (annualisierte Wachstumsrate)
+            # Formel: (Endwert / Startwert) ^ (1 / Jahre) - 1
+            total_days = (nav_series.index[-1] - nav_series.index[0]).days
+            years = total_days / 365.25
+            cagr = (nav_series.iloc[-1] / nav_series.iloc[0]) ** (1 / years) - 1 if years > 0 else 0
+
+            # 3. Volatilität (annualisiert für Quartalsdaten)
+            ann_vola = rets.std() * math.sqrt(4)
+
+            # 4. Max Drawdown
+            drawdown = (nav_series / nav_series.cummax() - 1).min()
+
+            # 5. Sharpe Ratio (vereinfacht ohne risikolosen Zins)
+            sharpe = (rets.mean() / rets.std()) * math.sqrt(4) if rets.std() != 0 else 0
+
             return {
                 "strategy": label,
-                "cagr": f"{((nav_series.iloc[-1]**(4/len(total_ret)))-1)*100:.1f} %",
-                "vola": f"{total_ret.std() * math.sqrt(4) * 100:.1f} %",
-                "max_dd": f"{(nav_series / nav_series.cummax() - 1).min() * 100:.1f} %",
-                "sharpe": round((total_ret.mean() / total_ret.std()) * math.sqrt(4), 2) if total_ret.std() != 0 else 0
+                "cagr": f"{cagr * 100:.1f} %",
+                "vola": f"{ann_vola * 100:.1f} %",
+                "max_dd": f"{drawdown * 100:.1f} %",
+                "sharpe": round(sharpe, 2)
             }
-
         # HIER WERDEN BEIDE ZEILEN ERZEUGT
         summary = [
             get_stats(portfolio_median, "Portfolio Median"),

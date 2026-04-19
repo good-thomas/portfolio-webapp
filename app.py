@@ -249,8 +249,11 @@ def run(prices, rets, settings):
     cost_rate = settings["cost"]
     history = []
 
+    # Die Hauptschleife
     for i in range(start, len(prices) - 1):
-w, active = build_weights_with_tilt(prices, i, prev_active, settings)
+        # HIER war der Fehler: Funktionsname und Einrückung müssen passen
+        w, active = build_weights_with_tilt(prices, i, prev_active, settings)
+
         if any(asset not in rets.columns for asset in assets):
             continue
 
@@ -284,7 +287,6 @@ w, active = build_weights_with_tilt(prices, i, prev_active, settings)
         raise ValueError("Backtest konnte nicht berechnet werden")
 
     return pd.Series(nav, index=dates), history
-
 
 def get_stats(nav, label):
     nav = nav.dropna().astype(float)

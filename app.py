@@ -140,74 +140,93 @@ def ret(prices, asset, i, n):
     return p1 / p0 - 1
 
 
-def is_active(asset, prices, i, prev_active):
-    if asset not in prices.columns:
-        return False
+def get_momentum_ranks(prices, i, assets):
+    """Berechnet den Rang basierend auf dem Durchschnitt von 3, 6 und 12 Monaten Momentum."""
+    moms = {}
+    for asset in assets:
+        if asset == "cash": continue
+        # Durchschnittliches Momentum über 3, 6 und 12 Monate
+        r3 = ret(prices, asset, i, 3)
+        r6 = ret(prices, asset, i, 6)
+        r12 = ret(prices, asset, i, 12)
+        moms[asset] = np.nanmean([r3, r6, r12])
+    
+    # Ranking: Höchstes Momentum = Rang 1
+    series = pd.Series(moms).sort_values(ascending=False)
+    ranks = {asset: rank + 1 for rank, asset in enumerate(series.index)}
+    return ranks
 
+def is_active_updated(asset, prices, i, prev_active, all_assets):
+    if asset not in prices.columns: return False
+    
+    # Basis: 10-Monats-SMA
     window10 = prices[asset].iloc[i - 9:i + 1]
-    if len(window10) < 10 or window10.isna().any():
-        return False
+    if len(window10) < 10 or window10.isna().any(): return False
+    base_signal = prices[asset].iloc[i] > window10.mean()
 
-    price = prices[asset].iloc[i]
-    sma = window10.mean()
-
-    base = price > sma
-
+    # Wenn bereits aktiv, reicht das SMA-Signal (Trend folgen)
     if prev_active:
-        return base
+        return bool(base_signal)
 
+    # Re-Entry Regeln (wenn vorher inaktiv)
     r3 = ret(prices, asset, i, 3)
     r6 = ret(prices, asset, i, 6)
-
+    
     if asset == "equities":
-        return bool(base or (pd.notna(r3) and r3 > 0))
+        ranks = get_momentum_ranks(prices, i, all_assets)
+        # 2 von 3: SMA, 3M-Ret > 0, Rang 1 oder 2
+        conds = [base_signal, (pd.notna(r3) and r3 > 0), (ranks.get(asset, 99) <= 2)]
+        return sum(conds) >= 2
 
     if asset in ["gold", "bonds"]:
-        conds = [
-            bool(base),
-            bool(pd.notna(r3) and r3 > 0),
-            bool(pd.notna(r6) and r6 > 0)
-        ]
+        # 2 von 3: SMA, 3M-Ret > 0, 6M-Ret > 0
+        conds = [base_signal, (pd.notna(r3) and r3 > 0), (pd.notna(r6) and r6 > 0)]
         return sum(conds) >= 2
 
     if asset in ["commodities", "managed_futures"]:
-        return bool(base and pd.notna(r3) and r3 > 0)
+        # Beide müssen erfüllt sein
+        return bool(base_signal and pd.notna(r3) and r3 > 0)
 
-    return bool(base)
+    return bool(base_signal)
 
-
-def build_weights(prices, i, prev_active, settings):
+def build_weights_with_tilt(prices, i, prev_active, settings):
     use_mf = settings["use_mf"]
-    base, assets = get_regime(use_mf)
-
-    active = {asset: is_active(asset, prices, i, prev_active.get(asset, False)) for asset in base}
-    actives = [asset for asset, v in active.items() if v]
+    base_config, all_assets = get_regime(use_mf)
+    
+    # 1. Aktivitäts-Status bestimmen
+    active = {a: is_active_updated(a, prices, i, prev_active.get(a, False), list(base_config.keys())) 
+              for a in base_config}
+    actives = [a for a, v in active.items() if v]
     n = len(actives)
 
-    cash = 0.03 if n >= 5 else 0.05 if n == 4 else 0.085 if n == 3 else 0.11 if n == 2 else 0.15 if n == 1 else 0.30
-
-    w = {asset: 0.0 for asset in assets}
-    w["cash"] = cash
-
+    # 2. Cash-Regel nach deiner Vorgabe
+    cash_map = {5: 0.03, 4: 0.05, 3: 0.08, 2: 0.11, 1: 0.15, 0: 0.35}
+    cash_quote = cash_map.get(n, 0.35)
+    
+    w = {asset: 0.0 for asset in all_assets}
+    
+    # 3. Spezialfall: 0 Assets aktiv (Defensiv-Hierarchie)
     if n == 0:
-        if "bonds" in w:
-            w["bonds"] = 0.3
-        if "gold" in w:
-            w["gold"] = 0.2
-        if sum(w.values()) < 1.0:
-            w["cash"] += 1.0 - sum(w.values())
+        # 35% Cash, Rest defensiv verteilt auf MF, Bonds, Gold
+        remaining = 1.0 - 0.35
+        w["managed_futures"] = remaining * 0.5 if "managed_futures" in w else 0
+        w["bonds"] = remaining * 0.3
+        w["gold"] = remaining * 0.2
+        w["cash"] = 1.0 - sum(w.values())
         return pd.Series(w), active
 
-    budget = 1.0 - cash
-    s = sum(base[a] for a in actives)
-
-    for asset in actives:
-        w[asset] = budget * base[asset] / s
-
-    total = sum(w.values())
-    if total < 1.0:
-        w["cash"] += 1.0 - total
-
+    # 4. Tilt-Score Berechnung (vereinfacht für "milden Tilt")
+    # Wir nehmen das 6-Monats-Momentum als Tilt-Faktor
+    budget = 1.0 - cash_quote
+    raw_tilts = {a: max(0.1, 1 + ret(prices, a, i, 6)) for a in actives}
+    
+    # Kombiniere Basisgewicht mit Tilt
+    total_weighted_base = sum(base_config[a] * raw_tilts[a] for a in actives)
+    
+    for a in actives:
+        w[a] = budget * (base_config[a] * raw_tilts[a]) / total_weighted_base
+    
+    w["cash"] = 1.0 - sum(w.values())
     return pd.Series(w), active
 
 

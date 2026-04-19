@@ -10,7 +10,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ------------------------------------------------------------
-# KONFIGURATION
+# KONFIG
 # ------------------------------------------------------------
 START_DATE = "2000-01-01"
 
@@ -20,15 +20,10 @@ DEFAULT_TICKERS = {
     "gold": "GLD",
     "commodities": "DBC",
     "managed_futures": "DBMF",
-    "cash": "SGOV"
+    "cash": "^IRX"
 }
 
-BENCHMARK_WEIGHTS = {
-    "equities": 0.70,
-    "bonds": 0.30
-}
-
-BASE_WEIGHTS = {
+BASE_WEIGHTS_FULL = {
     "equities": 0.55,
     "bonds": 0.10,
     "gold": 0.10,
@@ -36,365 +31,190 @@ BASE_WEIGHTS = {
     "managed_futures": 0.15
 }
 
-DEFENSIVE_PRIORITY = ["managed_futures", "bonds", "gold", "cash"]
-RISK_ASSETS = ["equities", "commodities"]
-ALL_ASSETS = ["equities", "bonds", "gold", "commodities", "managed_futures", "cash"]
+BENCHMARK_WEIGHTS = {"equities": 0.70, "bonds": 0.30}
 
 
 # ------------------------------------------------------------
-# DATENLADEN
+# REGIME
 # ------------------------------------------------------------
-def download_close_series(ticker, start=START_DATE):
-    data = yf.download(ticker, start=start, auto_adjust=True, progress=False)
-    if data.empty:
-        return pd.Series(dtype=float)
-
-    if isinstance(data.columns, pd.MultiIndex):
-        if ("Close", ticker) in data.columns:
-            s = data[("Close", ticker)]
-        else:
-            s = data.xs("Close", axis=1, level=0).iloc[:, 0]
+def get_regime(use_mf):
+    if use_mf:
+        base = BASE_WEIGHTS_FULL.copy()
+        assets = list(base.keys()) + ["cash"]
+        defensive = ["managed_futures", "bonds", "gold", "cash"]
     else:
-        s = data["Close"]
+        base = {
+            "equities": 0.55,
+            "bonds": 0.10,
+            "gold": 0.10,
+            "commodities": 0.10
+        }
+        s = sum(base.values())
+        base = {k: v/s for k, v in base.items()}
+        assets = list(base.keys()) + ["cash"]
+        defensive = ["bonds", "gold", "cash"]
 
-    return s.dropna().astype(float)
+    return base, assets, defensive
 
 
-def load_monthly_data():
+# ------------------------------------------------------------
+# DATEN
+# ------------------------------------------------------------
+def load_data(use_mf):
+    base, assets, _ = get_regime(use_mf)
+
     prices = {}
-    for asset, ticker in DEFAULT_TICKERS.items():
-        s = download_close_series(ticker)
-        if s.empty:
+    for a in assets:
+        t = DEFAULT_TICKERS[a]
+        df = yf.download(t, start=START_DATE, auto_adjust=True, progress=False)
+
+        if df.empty:
             continue
-        prices[asset] = s.resample("ME").last()
 
-    df_prices = pd.concat(prices, axis=1)
-    df_prices.columns = list(prices.keys())
-    df_prices = df_prices.sort_index().dropna(how="all").ffill()
+        s = df["Close"] if "Close" in df else df.iloc[:, 0]
+        prices[a] = s.resample("ME").last()
 
-    df_returns = df_prices.pct_change().fillna(0.0)
+    prices = pd.concat(prices, axis=1)
 
-    return df_prices, df_returns
+    # RETURNS
+    rets = {}
+
+    for a in prices.columns:
+        s = prices[a]
+
+        if a == "cash":
+            rets[a] = (s / 100) / 12
+        else:
+            rets[a] = s.pct_change()
+
+    rets = pd.DataFrame(rets)
+
+    return prices, rets
 
 
 # ------------------------------------------------------------
-# HILFSFUNKTIONEN
+# STARTPUNKT
 # ------------------------------------------------------------
-def descending_rank(series_dict):
-    s = pd.Series(series_dict, dtype=float)
-    return s.rank(ascending=False, method="min")
+def find_start(prices, assets):
+    for i in range(12, len(prices)):
+        ok = True
+        for a in assets:
+            window = prices[a].iloc[i-12:i+1]
+            if window.isna().any():
+                ok = False
+        if ok:
+            return i
+    return None
 
 
-def safe_return(prices, asset, idx, lookback):
-    if idx < lookback:
+# ------------------------------------------------------------
+# MOMENTUM
+# ------------------------------------------------------------
+def ret(prices, a, i, n):
+    if i < n:
         return np.nan
-    p0 = prices[asset].iloc[idx - lookback]
-    p1 = prices[asset].iloc[idx]
-    if pd.isna(p0) or pd.isna(p1) or p0 == 0:
-        return np.nan
-    return p1 / p0 - 1
-
-
-def get_10m_sma(prices, asset, idx):
-    if idx < 9:
-        return np.nan
-    return prices[asset].iloc[idx - 9: idx + 1].mean()
-
-
-def compute_cross_asset_momentum_rank(prices, idx):
-    values = {}
-    for asset in BASE_WEIGHTS.keys():
-        if asset not in prices.columns:
-            continue
-        r3 = safe_return(prices, asset, idx, 3)
-        r6 = safe_return(prices, asset, idx, 6)
-        r12 = safe_return(prices, asset, idx, 12)
-        vals = [x for x in [r3, r6, r12] if not pd.isna(x)]
-        if len(vals) == 0:
-            continue
-        values[asset] = np.mean(vals)
-
-    if not values:
-        return pd.Series(dtype=float)
-
-    return descending_rank(values)
+    return prices[a].iloc[i] / prices[a].iloc[i-n] - 1
 
 
 # ------------------------------------------------------------
-# AKTIV-/RE-ENTRY-REGELN
+# AKTIV
 # ------------------------------------------------------------
-def is_asset_active(asset, prices, idx, prev_active_map):
-    if asset not in prices.columns:
-        return False
+def is_active(a, prices, i, prev_active):
 
-    price = prices[asset].iloc[idx]
-    sma10 = get_10m_sma(prices, asset, idx)
+    price = prices[a].iloc[i]
+    sma = prices[a].iloc[i-9:i+1].mean()
 
-    if pd.isna(price) or pd.isna(sma10):
-        return False
+    base = price > sma
 
-    base_rule = price > sma10
-    was_prev_active = prev_active_map.get(asset, False)
+    if prev_active:
+        return base
 
-    if was_prev_active:
-        return base_rule
+    r3 = ret(prices, a, i, 3)
+    r6 = ret(prices, a, i, 6)
 
-    r3 = safe_return(prices, asset, idx, 3)
-    r6 = safe_return(prices, asset, idx, 6)
+    if a == "equities":
+        return sum([base, r3 > 0]) >= 1
 
-    if asset == "equities":
-        momentum_ranks = compute_cross_asset_momentum_rank(prices, idx)
-        rank_ok = asset in momentum_ranks.index and momentum_ranks[asset] <= 2
-        conditions = [
-            base_rule,
-            (not pd.isna(r3) and r3 > 0),
-            rank_ok
-        ]
-        return sum(bool(x) for x in conditions) >= 2
+    if a in ["gold", "bonds"]:
+        return sum([base, r3 > 0, r6 > 0]) >= 2
 
-    if asset in ["gold", "bonds"]:
-        conditions = [
-            base_rule,
-            (not pd.isna(r3) and r3 > 0),
-            (not pd.isna(r6) and r6 > 0)
-        ]
-        return sum(bool(x) for x in conditions) >= 2
+    if a in ["commodities", "managed_futures"]:
+        return base and (r3 > 0)
 
-    if asset in ["commodities", "managed_futures"]:
-        return base_rule and (not pd.isna(r3) and r3 > 0)
-
-    return base_rule
+    return base
 
 
 # ------------------------------------------------------------
-# TILT-SCORE
+# GEWICHTE
 # ------------------------------------------------------------
-def compute_tilt_scores(prices, idx, active_assets):
-    if len(active_assets) == 0:
-        return pd.Series(dtype=float)
+def build_weights(prices, i, prev_active, settings):
 
-    ret3 = {}
-    ret6 = {}
-    ret12 = {}
+    use_mf = settings["use_mf"]
+    base, assets, defensive = get_regime(use_mf)
 
-    for asset in active_assets:
-        r3 = safe_return(prices, asset, idx, 3)
-        r6 = safe_return(prices, asset, idx, 6)
-        r12 = safe_return(prices, asset, idx, 12)
+    active = {a: is_active(a, prices, i, prev_active.get(a, False)) for a in base}
 
-        if not pd.isna(r3):
-            ret3[asset] = r3
-        if not pd.isna(r6):
-            ret6[asset] = r6
-        if not pd.isna(r12):
-            ret12[asset] = r12
+    actives = [a for a, v in active.items() if v]
+    n = len(actives)
 
-    score = pd.Series(0.0, index=active_assets, dtype=float)
+    cash = 0.03 if n >= 5 else 0.05 if n==4 else 0.085 if n==3 else 0.11 if n==2 else 0.15 if n==1 else 0.3
 
-    if ret3:
-        ranks3 = descending_rank(ret3)
-        score = score.add((len(ranks3) + 1 - ranks3), fill_value=0.0)
+    w = {a: 0 for a in assets}
+    w["cash"] = cash
 
-    if ret6:
-        ranks6 = descending_rank(ret6)
-        score = score.add((len(ranks6) + 1 - ranks6), fill_value=0.0)
+    if n == 0:
+        w["bonds"] = 0.3
+        w["gold"] = 0.2
+        return pd.Series(w), active
 
-    if ret12:
-        ranks12 = descending_rank(ret12)
-        score = score.add((len(ranks12) + 1 - ranks12), fill_value=0.0)
+    budget = 1 - cash
 
-    return score.sort_values(ascending=False)
+    s = sum(base[a] for a in actives)
+    for a in actives:
+        w[a] = budget * base[a]/s
 
-
-# ------------------------------------------------------------
-# CASH-REGEL
-# ------------------------------------------------------------
-def determine_cash_weight(n_active):
-    if n_active >= 5:
-        return 0.03
-    if n_active == 4:
-        return 0.05
-    if n_active == 3:
-        return 0.085
-    if n_active == 2:
-        return 0.11
-    if n_active == 1:
-        return 0.15
-    return 0.30
-
-
-# ------------------------------------------------------------
-# DEFENSIVE HIERARCHIE
-# ------------------------------------------------------------
-def distribute_inactive_risk_gaps(weights, active_map):
-    for asset in RISK_ASSETS:
-        if active_map.get(asset, False):
-            continue
-
-        gap = BASE_WEIGHTS.get(asset, 0.0)
-        if gap <= 0:
-            continue
-
-        for target in DEFENSIVE_PRIORITY:
-            if target == "cash":
-                weights["cash"] += gap
-                break
-
-            if weights.get(target, 0.0) > 0:
-                weights[target] += gap
-                break
-
-    return weights
-
-
-# ------------------------------------------------------------
-# GEWICHTUNG
-# ------------------------------------------------------------
-def build_target_weights(prices, idx, settings, prev_active_map):
-    active_map = {}
-    for asset in BASE_WEIGHTS.keys():
-        active_map[asset] = is_asset_active(asset, prices, idx, prev_active_map)
-
-    active_assets = [a for a, active in active_map.items() if active]
-    n_active = len(active_assets)
-
-    cash_weight = determine_cash_weight(n_active)
-
-    weights = {asset: 0.0 for asset in ALL_ASSETS}
-    weights["cash"] = cash_weight
-
-    if n_active == 0:
-        if "managed_futures" in DEFAULT_TICKERS:
-            weights["managed_futures"] = 0.40
-        if "bonds" in DEFAULT_TICKERS:
-            weights["bonds"] = 0.20
-        if "gold" in DEFAULT_TICKERS:
-            weights["gold"] = 0.10
-
-        allocated = sum(weights.values())
-        if allocated < 1.0:
-            weights["cash"] += 1.0 - allocated
-
-        return pd.Series(weights), active_map, pd.Series(dtype=float)
-
-    investable_budget = 1.0 - cash_weight
-
-    active_base_sum = sum(BASE_WEIGHTS[a] for a in active_assets)
-    for asset in active_assets:
-        weights[asset] = investable_budget * BASE_WEIGHTS[asset] / active_base_sum
-
-    weights = distribute_inactive_risk_gaps(weights, active_map)
-
-    tilt_scores = compute_tilt_scores(prices, idx, active_assets)
-    if not tilt_scores.empty and len(active_assets) > 1:
-        base_active_weights = pd.Series({a: weights[a] for a in active_assets}, dtype=float)
-
-        centered = tilt_scores - tilt_scores.mean()
-        if centered.abs().sum() > 0:
-            tilt_strength = float(settings.get("tilt_strength", 0.12))
-            tilt_vector = centered / centered.abs().sum()
-
-            adjusted = base_active_weights * (1.0 + tilt_strength * tilt_vector)
-            adjusted = adjusted.clip(lower=0.0)
-
-            if adjusted.sum() > 0:
-                adjusted = adjusted / adjusted.sum() * base_active_weights.sum()
-                for asset in active_assets:
-                    weights[asset] = float(adjusted[asset])
-
-    total = sum(weights.values())
-    if abs(total - 1.0) > 1e-9:
-        weights["cash"] += 1.0 - total
-
-    return pd.Series(weights).reindex(ALL_ASSETS).fillna(0.0), active_map, tilt_scores
+    return pd.Series(w), active
 
 
 # ------------------------------------------------------------
 # BACKTEST
 # ------------------------------------------------------------
-def run_strategy(prices, returns, settings):
-    start_idx = 12
-    dates = prices.index
+def run(prices, rets, settings):
 
-    nav = [1.0]
-    nav_dates = [dates[start_idx]]
-    weight_records = []
+    base, assets, _ = get_regime(settings["use_mf"])
+    start = find_start(prices, list(base.keys()) + ["cash"])
 
-    prev_active_map = {asset: False for asset in BASE_WEIGHTS.keys()}
-    prev_weights = pd.Series(0.0, index=ALL_ASSETS, dtype=float)
-    prev_weights["cash"] = 1.0
+    nav = [1]
+    dates = [prices.index[start]]
 
-    transaction_cost_rate = float(settings.get("transaction_cost_rate", 0.001))
+    prev_w = pd.Series(0, index=assets)
+    prev_w["cash"] = 1
 
-    for idx in range(start_idx, len(dates) - 1):
-        target_weights, active_map, tilt_scores = build_target_weights(prices, idx, settings, prev_active_map)
+    prev_active = {}
 
-        turnover = float((target_weights - prev_weights).abs().sum())
-        rebalancing_cost = transaction_cost_rate * turnover / 2.0
+    cost_rate = settings["cost"]
 
-        next_ret = returns.iloc[idx + 1].reindex(ALL_ASSETS).fillna(0.0)
-        gross_port_ret = float((target_weights * next_ret).sum())
-        net_port_ret = gross_port_ret - rebalancing_cost
+    for i in range(start, len(prices)-1):
 
-        nav.append(nav[-1] * (1.0 + net_port_ret))
-        nav_dates.append(dates[idx + 1])
+        w, active = build_weights(prices, i, prev_active, settings)
 
-        weight_records.append({
-            "date": dates[idx + 1].strftime("%Y-%m-%d"),
-            **{k: float(v) for k, v in target_weights.items()},
-            "active_assets": [a for a, flag in active_map.items() if flag],
-            "tilt_scores": {k: float(v) for k, v in tilt_scores.to_dict().items()},
-            "turnover": turnover,
-            "rebalancing_cost": rebalancing_cost,
-            "gross_return": gross_port_ret,
-            "net_return": net_port_ret
-        })
+        r = rets.iloc[i+1][assets]
 
-        prev_active_map = active_map.copy()
-        prev_weights = target_weights.copy()
+        if r.isna().any():
+            continue
 
-    return pd.Series(nav, index=nav_dates, dtype=float), weight_records
+        turnover = (w - prev_w).abs().sum()
+        cost = cost_rate * turnover / 2
 
+        port = (w * r).sum() - cost
 
-def build_benchmark_nav(returns, start_date):
-    bench_ret = returns[["equities", "bonds"]].mul(pd.Series(BENCHMARK_WEIGHTS), axis=1).sum(axis=1)
-    bench_ret = bench_ret[bench_ret.index >= start_date]
-    return (1.0 + bench_ret).cumprod()
+        nav.append(nav[-1]*(1+port))
+        dates.append(prices.index[i+1])
 
+        prev_w = w
+        prev_active = active
 
-# ------------------------------------------------------------
-# STATS
-# ------------------------------------------------------------
-def get_stats(nav_series, label):
-    nav_series = nav_series.dropna().astype(float)
-
-    if len(nav_series) < 2:
-        return {
-            "strategy": label,
-            "cagr": "0.0 %",
-            "vola": "0.0 %",
-            "max_dd": "0.0 %",
-            "sharpe": 0
-        }
-
-    rets = nav_series.pct_change().dropna()
-
-    start_val = float(nav_series.iloc[0])
-    end_val = float(nav_series.iloc[-1])
-    years = (nav_series.index[-1] - nav_series.index[0]).days / 365.25
-
-    cagr_val = (end_val / start_val) ** (1 / years) - 1 if years > 0 and start_val > 0 else 0.0
-    ann_vola = rets.std() * math.sqrt(12) if not rets.empty else 0.0
-    drawdown = (nav_series / nav_series.cummax() - 1).min()
-    sharpe = (rets.mean() / rets.std()) * math.sqrt(12) if not rets.empty and rets.std() != 0 else 0.0
-
-    return {
-        "strategy": label,
-        "cagr": f"{cagr_val * 100:.1f} %",
-        "vola": f"{ann_vola * 100:.1f} %",
-        "max_dd": f"{drawdown * 100:.1f} %",
-        "sharpe": round(float(sharpe), 2)
-    }
+    return pd.Series(nav, index=dates)
 
 
 # ------------------------------------------------------------
@@ -402,46 +222,33 @@ def get_stats(nav_series, label):
 # ------------------------------------------------------------
 @app.route("/api/backtest", methods=["POST"])
 def backtest():
-    try:
-        data = request.json or {}
 
-        settings = {
-            "tilt_strength": float(data.get("tilt_strength", 0.12)),
-            "transaction_cost_rate": float(data.get("transaction_cost_rate", 0.001))
+    data = request.json or {}
+
+    settings = {
+        "use_mf": data.get("use_managed_futures", True),
+        "cost": float(data.get("transaction_cost_rate", 0.001))
+    }
+
+    prices, rets = load_data(settings["use_mf"])
+    nav = run(prices, rets, settings)
+
+    bench = (rets[["equities","bonds"]]
+             .dropna()
+             .mul(pd.Series(BENCHMARK_WEIGHTS), axis=1)
+             .sum(axis=1))
+
+    bench = (1+bench[bench.index >= nav.index[0]]).cumprod()
+
+    idx = nav.index.intersection(bench.index)
+
+    return jsonify({
+        "chart": {
+            "dates": [d.strftime("%Y-%m-%d") for d in idx],
+            "portfolio": nav.loc[idx].tolist(),
+            "benchmark": bench.loc[idx].tolist()
         }
-
-        prices, returns = load_monthly_data()
-        portfolio_nav, weights_history = run_strategy(prices, returns, settings)
-        benchmark_nav = build_benchmark_nav(returns, portfolio_nav.index[0])
-
-        aligned_index = portfolio_nav.index.intersection(benchmark_nav.index)
-        portfolio_nav = portfolio_nav.loc[aligned_index]
-        benchmark_nav = benchmark_nav.loc[aligned_index]
-
-        summary = [
-            get_stats(portfolio_nav, "Portfolio"),
-            get_stats(benchmark_nav, "Benchmark 70/30")
-        ]
-
-        return jsonify({
-            "summary": summary,
-            "chart": {
-                "dates": [d.strftime("%Y-%m-%d") for d in aligned_index],
-                "portfolio": portfolio_nav.tolist(),
-                "benchmark": benchmark_nav.tolist()
-            },
-            "weights": weights_history,
-            "meta": {
-                "rebalance_frequency": "monthly",
-                "benchmark": {"equities": "ACWI", "bonds": "IEF"},
-                "proxies": DEFAULT_TICKERS,
-                "transaction_cost_rate": settings["transaction_cost_rate"],
-                "note": "DBC enthält auch Gold-Exposure und ist daher nicht vollständig ex Gold."
-            }
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    })
 
 
 if __name__ == "__main__":

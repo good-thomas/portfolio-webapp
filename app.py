@@ -136,11 +136,9 @@ def is_asset_active(asset, prices, idx, prev_active_map):
     base_rule = price > sma10
     was_prev_active = prev_active_map.get(asset, False)
 
-    # Normale Regel für Assets, die bereits aktiv waren
     if was_prev_active:
         return base_rule
 
-    # Schnellere Re-Entry-Regeln für vorher inaktive Assets
     r3 = safe_return(prices, asset, idx, 3)
     r6 = safe_return(prices, asset, idx, 6)
 
@@ -193,7 +191,6 @@ def compute_tilt_scores(prices, idx, active_assets):
 
     score = pd.Series(0.0, index=active_assets, dtype=float)
 
-    # Höhere Momentum-Ränge -> höherer Score
     if ret3:
         ranks3 = descending_rank(ret3)
         score = score.add((len(ranks3) + 1 - ranks3), fill_value=0.0)
@@ -230,7 +227,6 @@ def determine_cash_weight(n_active):
 # DEFENSIVE HIERARCHIE
 # ------------------------------------------------------------
 def distribute_inactive_risk_gaps(weights, active_map):
-    # Nur echte Risk-Blöcke werden ausdrücklich defensiv ersetzt
     for asset in RISK_ASSETS:
         if active_map.get(asset, False):
             continue
@@ -267,7 +263,6 @@ def build_target_weights(prices, idx, settings, prev_active_map):
     weights = {asset: 0.0 for asset in ALL_ASSETS}
     weights["cash"] = cash_weight
 
-    # Spezialfall: nichts aktiv
     if n_active == 0:
         if "managed_futures" in DEFAULT_TICKERS:
             weights["managed_futures"] = 0.40
@@ -284,15 +279,12 @@ def build_target_weights(prices, idx, settings, prev_active_map):
 
     investable_budget = 1.0 - cash_weight
 
-    # Kern proportional auf aktive Assets umlegen
     active_base_sum = sum(BASE_WEIGHTS[a] for a in active_assets)
     for asset in active_assets:
         weights[asset] = investable_budget * BASE_WEIGHTS[asset] / active_base_sum
 
-    # Defensiv-Hierarchie für weggefallene Risk-Blöcke
     weights = distribute_inactive_risk_gaps(weights, active_map)
 
-    # Moderater Tilt
     tilt_scores = compute_tilt_scores(prices, idx, active_assets)
     if not tilt_scores.empty and len(active_assets) > 1:
         base_active_weights = pd.Series({a: weights[a] for a in active_assets}, dtype=float)
@@ -329,24 +321,37 @@ def run_strategy(prices, returns, settings):
     weight_records = []
 
     prev_active_map = {asset: False for asset in BASE_WEIGHTS.keys()}
+    prev_weights = pd.Series(0.0, index=ALL_ASSETS, dtype=float)
+    prev_weights["cash"] = 1.0
+
+    transaction_cost_rate = float(settings.get("transaction_cost_rate", 0.001))
 
     for idx in range(start_idx, len(dates) - 1):
-        weights, active_map, tilt_scores = build_target_weights(prices, idx, settings, prev_active_map)
+        target_weights, active_map, tilt_scores = build_target_weights(prices, idx, settings, prev_active_map)
+
+        turnover = float((target_weights - prev_weights).abs().sum())
+        rebalancing_cost = transaction_cost_rate * turnover / 2.0
 
         next_ret = returns.iloc[idx + 1].reindex(ALL_ASSETS).fillna(0.0)
-        port_ret = float((weights * next_ret).sum())
+        gross_port_ret = float((target_weights * next_ret).sum())
+        net_port_ret = gross_port_ret - rebalancing_cost
 
-        nav.append(nav[-1] * (1.0 + port_ret))
+        nav.append(nav[-1] * (1.0 + net_port_ret))
         nav_dates.append(dates[idx + 1])
 
         weight_records.append({
             "date": dates[idx + 1].strftime("%Y-%m-%d"),
-            **{k: float(v) for k, v in weights.items()},
+            **{k: float(v) for k, v in target_weights.items()},
             "active_assets": [a for a, flag in active_map.items() if flag],
-            "tilt_scores": {k: float(v) for k, v in tilt_scores.to_dict().items()}
+            "tilt_scores": {k: float(v) for k, v in tilt_scores.to_dict().items()},
+            "turnover": turnover,
+            "rebalancing_cost": rebalancing_cost,
+            "gross_return": gross_port_ret,
+            "net_return": net_port_ret
         })
 
         prev_active_map = active_map.copy()
+        prev_weights = target_weights.copy()
 
     return pd.Series(nav, index=nav_dates, dtype=float), weight_records
 
@@ -401,7 +406,8 @@ def backtest():
         data = request.json or {}
 
         settings = {
-            "tilt_strength": float(data.get("tilt_strength", 0.12))
+            "tilt_strength": float(data.get("tilt_strength", 0.12)),
+            "transaction_cost_rate": float(data.get("transaction_cost_rate", 0.001))
         }
 
         prices, returns = load_monthly_data()
@@ -429,6 +435,7 @@ def backtest():
                 "rebalance_frequency": "monthly",
                 "benchmark": {"equities": "ACWI", "bonds": "IEF"},
                 "proxies": DEFAULT_TICKERS,
+                "transaction_cost_rate": settings["transaction_cost_rate"],
                 "note": "DBC enthält auch Gold-Exposure und ist daher nicht vollständig ex Gold."
             }
         })

@@ -250,8 +250,7 @@ def run(prices, rets, settings):
     history = []
 
     for i in range(start, len(prices) - 1):
-        w, active = build_weights(prices, i, prev_active, settings)
-
+w, active = build_weights_with_tilt(prices, i, prev_active, settings)
         if any(asset not in rets.columns for asset in assets):
             continue
 

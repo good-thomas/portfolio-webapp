@@ -228,6 +228,7 @@ def run(prices, rets, settings):
 
     prev_active = {}
     cost_rate = settings["cost"]
+    history = []
 
     for i in range(start, len(prices) - 1):
         w, active = build_weights(prices, i, prev_active, settings)
@@ -242,10 +243,21 @@ def run(prices, rets, settings):
 
         turnover = float((w - prev_w).abs().sum())
         cost = cost_rate * turnover / 2.0
-        port = float((w * r).sum()) - cost
+        gross_port = float((w * r).sum())
+        net_port = gross_port - cost
 
-        nav.append(nav[-1] * (1.0 + port))
+        nav.append(nav[-1] * (1.0 + net_port))
         dates.append(prices.index[i + 1])
+
+        history.append({
+            "date": prices.index[i + 1].strftime("%Y-%m-%d"),
+            "weights": {k: float(v) for k, v in w.items()},
+            "turnover": turnover,
+            "rebalancing_cost": cost,
+            "gross_return": gross_port,
+            "net_return": net_port,
+            "active_assets": [k for k, v in active.items() if v]
+        })
 
         prev_w = w
         prev_active = active
@@ -253,7 +265,36 @@ def run(prices, rets, settings):
     if len(nav) < 2:
         raise ValueError("Backtest konnte nicht berechnet werden")
 
-    return pd.Series(nav, index=dates)
+    return pd.Series(nav, index=dates), history
+
+
+def get_stats(nav, label):
+    nav = nav.dropna().astype(float)
+
+    if len(nav) < 2:
+        return {
+            "strategy": label,
+            "cagr": "0.0 %",
+            "vola": "0.0 %",
+            "max_dd": "0.0 %",
+            "sharpe": 0
+        }
+
+    rets = nav.pct_change().dropna()
+    years = (nav.index[-1] - nav.index[0]).days / 365.25
+
+    cagr = (nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1 if years > 0 else 0.0
+    vola = rets.std() * math.sqrt(12) if len(rets) > 1 else 0.0
+    dd = (nav / nav.cummax() - 1).min()
+    sharpe = (rets.mean() / rets.std()) * math.sqrt(12) if len(rets) > 1 and rets.std() != 0 else 0.0
+
+    return {
+        "strategy": label,
+        "cagr": f"{cagr * 100:.1f} %",
+        "vola": f"{vola * 100:.1f} %",
+        "max_dd": f"{dd * 100:.1f} %",
+        "sharpe": round(float(sharpe), 2)
+    }
 
 
 @app.route("/api/backtest", methods=["POST"])
@@ -267,7 +308,7 @@ def backtest():
         }
 
         prices, rets = load_data(settings["use_mf"])
-        nav = run(prices, rets, settings)
+        nav, history = run(prices, rets, settings)
 
         if "equities" not in rets.columns or "bonds" not in rets.columns:
             raise ValueError("Benchmark-Daten fehlen")
@@ -286,11 +327,26 @@ def backtest():
         if len(idx) == 0:
             raise ValueError("Keine gemeinsame Historie zwischen Portfolio und Benchmark")
 
+        latest = history[-1] if history else None
+
         return jsonify({
+            "summary": [
+                get_stats(nav.loc[idx], "Portfolio"),
+                get_stats(bench.loc[idx], "Benchmark 70/30")
+            ],
             "chart": {
                 "dates": [d.strftime("%Y-%m-%d") for d in idx],
                 "portfolio": nav.loc[idx].tolist(),
                 "benchmark": bench.loc[idx].tolist()
+            },
+            "latest_weights": latest,
+            "meta": {
+                "use_managed_futures": settings["use_mf"],
+                "transaction_cost_rate": settings["cost"],
+                "proxies": {
+                    asset: DEFAULT_TICKERS[asset]
+                    for asset in get_regime(settings["use_mf"])[1]
+                }
             }
         })
 

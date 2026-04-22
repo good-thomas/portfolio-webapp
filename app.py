@@ -174,6 +174,27 @@ def find_start(prices, assets):
     return None
 
 
+def resolve_start_index(prices, assets, requested_start_date=None):
+    auto_start = find_start(prices, assets)
+
+    if auto_start is None:
+        return None
+
+    if not requested_start_date:
+        return auto_start
+
+    requested_ts = pd.to_datetime(requested_start_date, errors="coerce")
+    if pd.isna(requested_ts):
+        raise ValueError("Ungültiges start_date Format. Bitte YYYY-MM-DD verwenden")
+
+    eligible_dates = prices.index[prices.index >= requested_ts]
+    if len(eligible_dates) == 0:
+        raise ValueError("start_date liegt nach dem verfügbaren Datenbereich")
+
+    requested_idx = prices.index.get_loc(eligible_dates[0])
+    return max(auto_start, requested_idx)
+
+
 def ret(prices, asset, i, n):
     if asset not in prices.columns or i < n:
         return np.nan
@@ -269,7 +290,7 @@ def run(prices, rets, settings):
     base, assets = get_regime(settings["use_mf"])
 
     required_assets = list(base.keys()) + [RISK_FREE_ASSET]
-    start = find_start(prices, required_assets)
+    start = resolve_start_index(prices, required_assets, settings.get("start_date"))
 
     if start is None:
         raise ValueError("Nicht genügend Historie für die gewählten Assets")
@@ -358,7 +379,8 @@ def backtest():
 
         settings = {
             "use_mf": bool(data.get("use_managed_futures", True)),
-            "cost": float(data.get("transaction_cost_rate", 0.001))
+            "cost": float(data.get("transaction_cost_rate", 0.001)),
+            "start_date": data.get("start_date")
         }
 
         prices, rets = load_data(settings["use_mf"])
@@ -405,6 +427,8 @@ def backtest():
             "meta": {
                 "use_managed_futures": settings["use_mf"],
                 "transaction_cost_rate": settings["cost"],
+                "start_date": settings["start_date"],
+                "actual_start_date": idx[0].strftime("%Y-%m-%d") if len(idx) else None,
                 "managed_futures_source": "local_sg_trend_file" if os.path.exists(SG_TREND_FILE) else "yfinance_dbmf",
                 "proxies": proxies
             }

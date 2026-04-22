@@ -1,0 +1,365 @@
+<div id="pbt-app" style="font-family:Arial,sans-serif;max-width:1100px;margin:40px auto;color:#222;line-height:1.4">
+  <style>
+    #pbt-app .box {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+      background: #fafafa;
+    }
+
+    #pbt-app .row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: end;
+    }
+
+    #pbt-app .field {
+      display: flex;
+      flex-direction: column;
+      min-width: 220px;
+      margin-bottom: 12px;
+    }
+
+    #pbt-app label {
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+
+    #pbt-app input[type="text"] {
+      padding: 10px;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+
+    #pbt-app .checkbox-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      min-height: 42px;
+    }
+
+    #pbt-app button {
+      padding: 12px 18px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      background: #111;
+      color: white;
+      font-size: 14px;
+    }
+
+    #pbt-app table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      background: white;
+    }
+
+    #pbt-app th,
+    #pbt-app td {
+      border: 1px solid #ddd;
+      padding: 10px;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    #pbt-app th {
+      background: #f2f2f2;
+    }
+
+    #pbt-app .muted {
+      color: #666;
+      font-size: 13px;
+    }
+
+    #pbt-app .error {
+      color: #b00020;
+      font-weight: bold;
+    }
+
+    #pbt-app .success {
+      color: #0a7a32;
+      font-weight: bold;
+    }
+
+    #pbt-app .chart-wrap {
+      position: relative;
+      width: 100%;
+      min-height: 420px;
+    }
+
+    #pbt-app canvas {
+      width: 100% !important;
+      height: 420px !important;
+      display: block;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+
+    #pbt-app pre {
+      overflow: auto;
+      background: #fff;
+      border: 1px solid #ddd;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+
+  <div class="box">
+    <h2 style="margin-top:0">Portfolio Backtest</h2>
+    <p class="muted">Vergleich zum 70/30 Portfolio auf Basis deiner Render-API</p>
+
+    <div class="row">
+      <div class="field">
+        <label for="pbt-cost">Rebalancing-Kosten</label>
+        <input id="pbt-cost" type="text" value="0.001">
+      </div>
+
+      <div class="checkbox-wrap">
+        <input id="pbt-mf" type="checkbox" checked>
+        <label for="pbt-mf" style="margin:0">Managed Futures verwenden</label>
+      </div>
+    </div>
+
+    <button id="pbt-run" type="button">Backtest starten</button>
+    <p id="pbt-status" class="muted"></p>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Chart</h3>
+    <div class="chart-wrap">
+      <canvas id="pbt-chart"></canvas>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Performance</h3>
+    <div id="pbt-summary"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Letzte Verteilung</h3>
+    <div id="pbt-weights"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Vergleich / Meta</h3>
+    <div id="pbt-meta"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Rohdaten</h3>
+    <pre id="pbt-raw">Noch keine Daten geladen</pre>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    (function () {
+      var API_URL = "https://portfolio-webapp-kkxd.onrender.com/api/backtest";
+
+      var btn = document.getElementById("pbt-run");
+      var statusEl = document.getElementById("pbt-status");
+      var rawEl = document.getElementById("pbt-raw");
+      var summaryEl = document.getElementById("pbt-summary");
+      var weightsEl = document.getElementById("pbt-weights");
+      var metaEl = document.getElementById("pbt-meta");
+      var chartCanvas = document.getElementById("pbt-chart");
+
+      var chartInstance = null;
+
+      function renderSummary(summary) {
+        if (!summary || !summary.length) {
+          summaryEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var html = '<table><thead><tr><th>Strategie</th><th>CAGR</th><th>Vola</th><th>Max DD</th><th>Sharpe</th></tr></thead><tbody>';
+
+        summary.forEach(function (row) {
+          html += '<tr>' +
+            '<td>' + (row.strategy || '') + '</td>' +
+            '<td>' + (row.cagr || '') + '</td>' +
+            '<td>' + (row.vola || '') + '</td>' +
+            '<td>' + (row.max_dd || '') + '</td>' +
+            '<td>' + (row.sharpe || '') + '</td>' +
+            '</tr>';
+        });
+
+        html += '</tbody></table>';
+        summaryEl.innerHTML = html;
+      }
+
+      function renderWeights(latest) {
+        if (!latest || !latest.weights) {
+          weightsEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var html = '';
+        html += '<p><strong>Datum:</strong> ' + (latest.date || '-') + '</p>';
+        html += '<p><strong>Aktive Assets:</strong> ' + ((latest.active_assets || []).join(', ') || '-') + '</p>';
+
+        html += '<table><thead><tr><th>Asset</th><th>Gewicht</th></tr></thead><tbody>';
+
+        Object.keys(latest.weights).forEach(function (key) {
+          var val = latest.weights[key];
+          html += '<tr><td>' + key + '</td><td>' + (val * 100).toFixed(2) + ' %</td></tr>';
+        });
+
+        html += '</tbody></table>';
+
+        html += '<table><thead><tr><th>Kennzahl</th><th>Wert</th></tr></thead><tbody>';
+        html += '<tr><td>Turnover</td><td>' + ((latest.turnover || 0) * 100).toFixed(2) + ' %</td></tr>';
+        html += '<tr><td>Rebalancing-Kosten</td><td>' + ((latest.rebalancing_cost || 0) * 100).toFixed(3) + ' %</td></tr>';
+        html += '<tr><td>Bruttorendite</td><td>' + ((latest.gross_return || 0) * 100).toFixed(2) + ' %</td></tr>';
+        html += '<tr><td>Nettorendite</td><td>' + ((latest.net_return || 0) * 100).toFixed(2) + ' %</td></tr>';
+        html += '</tbody></table>';
+
+        weightsEl.innerHTML = html;
+      }
+
+      function renderMeta(meta) {
+        if (!meta) {
+          metaEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var html = '<table><tbody>';
+        html += '<tr><th>Managed Futures</th><td>' + (meta.use_managed_futures ? 'an' : 'aus') + '</td></tr>';
+        html += '<tr><th>Rebalancing-Kosten</th><td>' + ((meta.transaction_cost_rate || 0) * 100).toFixed(2) + ' %</td></tr>';
+        html += '<tr><th>Benchmark</th><td>70 % ACWI / 30 % IEF</td></tr>';
+
+        if (meta.proxies) {
+          html += '<tr><th>Proxies</th><td><pre>' + JSON.stringify(meta.proxies, null, 2) + '</pre></td></tr>';
+        }
+
+        html += '</tbody></table>';
+        metaEl.innerHTML = html;
+      }
+
+      function renderChart(chart) {
+        if (!chart || !chart.dates || !chart.portfolio || !chart.benchmark) {
+          return;
+        }
+
+        if (chartInstance) {
+          chartInstance.destroy();
+        }
+
+        chartInstance = new Chart(chartCanvas.getContext("2d"), {
+          type: "line",
+          data: {
+            labels: chart.dates,
+            datasets: [
+              {
+                label: "Portfolio",
+                data: chart.portfolio,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.15
+              },
+              {
+                label: "Benchmark 70/30",
+                data: chart.benchmark,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.15
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+              mode: "index",
+              intersect: false
+            },
+            plugins: {
+              legend: {
+                display: true
+              },
+              tooltip: {
+                callbacks: {
+                  label: function(context) {
+                    var val = context.parsed.y;
+                    return context.dataset.label + ": " + (typeof val === "number" ? val.toFixed(3) : val);
+                  }
+                }
+              }
+            },
+            scales: {
+              x: {
+                ticks: {
+                  maxTicksLimit: 12
+                }
+              },
+              y: {
+                beginAtZero: false
+              }
+            }
+          }
+        });
+      }
+
+      btn.addEventListener("click", function () {
+        var cost = parseFloat(String(document.getElementById("pbt-cost").value).replace(",", "."));
+        var useMF = document.getElementById("pbt-mf").checked;
+
+        if (!isFinite(cost)) {
+          statusEl.className = "error";
+          statusEl.textContent = "Ungültiger Kostenwert";
+          return;
+        }
+
+        statusEl.className = "muted";
+        statusEl.textContent = "Lädt ...";
+
+        fetch(API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          body: JSON.stringify({
+            transaction_cost_rate: cost,
+            use_managed_futures: useMF
+          })
+        })
+        .then(function (res) {
+          return res.json().then(function (data) {
+            return { ok: res.ok, data: data };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok) {
+            throw new Error(result.data && result.data.error ? result.data.error : "API-Fehler");
+          }
+
+          statusEl.className = "success";
+          statusEl.textContent = "Backtest erfolgreich geladen";
+
+          renderChart(result.data.chart);
+          renderSummary(result.data.summary);
+          renderWeights(result.data.latest_weights);
+          renderMeta(result.data.meta);
+          rawEl.textContent = JSON.stringify(result.data, null, 2);
+        })
+        .catch(function (err) {
+          statusEl.className = "error";
+          statusEl.textContent = "Fehler: " + err.message;
+          rawEl.textContent = String(err && err.stack ? err.stack : err);
+        });
+      });
+    })();
+  </script>
+</div>

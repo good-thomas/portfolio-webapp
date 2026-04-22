@@ -97,20 +97,43 @@ def load_data(use_mf=True, include_bitcoin=True):
     return prices, rets
 
 
+def has_required_history(prices, assets, i, lookback=12):
+    if i < lookback:
+        return False
+    for asset in assets:
+        if asset not in prices.columns:
+            return False
+        window = prices[asset].iloc[i - lookback:i + 1]
+        if window.isna().any():
+            return False
+    return True
+
+
 def find_start(prices, assets, lookback=12):
     for i in range(lookback, len(prices)):
-        ok = True
-        for asset in assets:
-            if asset not in prices.columns:
-                ok = False
-                break
-            window = prices[asset].iloc[i - lookback:i + 1]
-            if window.isna().any():
-                ok = False
-                break
-        if ok:
+        if has_required_history(prices, assets, i, lookback=lookback):
             return i
     return None
+
+
+def resolve_start_index(prices, assets, start_date=None, lookback=12):
+    if not start_date:
+        return find_start(prices, assets, lookback=lookback)
+
+    try:
+        target_date = pd.Timestamp(start_date)
+    except Exception:
+        raise ValueError("Ungültiges Startdatum. Format bitte YYYY-MM-DD")
+
+    candidate_positions = np.where(prices.index >= target_date)[0]
+    if len(candidate_positions) == 0:
+        raise ValueError("Startdatum liegt nach der verfügbaren Historie")
+
+    for i in candidate_positions:
+        if has_required_history(prices, assets, i, lookback=lookback):
+            return int(i)
+
+    raise ValueError("Für das gewählte Startdatum ist nicht genug Historie vorhanden")
 
 
 def ret(prices, asset, i, n):
@@ -274,7 +297,12 @@ def run(prices, rets, settings):
     risky_assets, all_assets = get_universe(settings["use_mf"], settings["include_bitcoin"])
     required_assets = list(risky_assets) + [RISK_FREE_ASSET, "equities", "bonds"]
 
-    start = find_start(prices, required_assets, lookback=12)
+    start = resolve_start_index(
+        prices=prices,
+        assets=required_assets,
+        start_date=settings.get("start_date"),
+        lookback=12
+    )
     if start is None:
         raise ValueError("Nicht genügend Historie für die gewählten Assets")
 
@@ -365,7 +393,8 @@ def backtest_v2():
             "use_mf": bool(data.get("use_managed_futures", True)),
             "include_bitcoin": bool(data.get("include_bitcoin", True)),
             "cost": float(data.get("transaction_cost_rate", 0.001)),
-            "risk_factor": float(data.get("risk_factor", 1.0))
+            "risk_factor": float(data.get("risk_factor", 1.0)),
+            "start_date": data.get("start_date")
         }
 
         prices, rets = load_data(settings["use_mf"], settings["include_bitcoin"])
@@ -406,6 +435,7 @@ def backtest_v2():
                 "include_bitcoin": settings["include_bitcoin"],
                 "transaction_cost_rate": settings["cost"],
                 "risk_factor": settings["risk_factor"],
+                "start_date": settings["start_date"],
                 "ranking_method": "pairwise_wins_on_weighted_momentum_div_vol",
                 "weighting_method": "score_proportional_then_risk_targeted",
                 "selected_count": 3,

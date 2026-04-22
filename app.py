@@ -10,6 +10,11 @@ app = Flask(__name__)
 CORS(app)
 
 START_DATE = "2000-01-01"
+RISK_FREE_ASSET = "cash"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+SG_TREND_FILE = os.path.join(DATA_DIR, "SG_TRD_IDX.TXT")
 
 DEFAULT_TICKERS = {
     "equities": "ACWI",
@@ -34,7 +39,7 @@ BENCHMARK_WEIGHTS = {"equities": 0.70, "bonds": 0.30}
 def get_regime(use_mf):
     if use_mf:
         base = BASE_WEIGHTS_FULL.copy()
-        assets = list(base.keys()) + ["cash"]
+        assets = list(base.keys()) + [RISK_FREE_ASSET]
     else:
         base = {
             "equities": 0.55,
@@ -44,7 +49,7 @@ def get_regime(use_mf):
         }
         s = sum(base.values())
         base = {k: v / s for k, v in base.items()}
-        assets = list(base.keys()) + ["cash"]
+        assets = list(base.keys()) + [RISK_FREE_ASSET]
 
     return base, assets
 
@@ -80,19 +85,58 @@ def extract_close_series(df, ticker):
     return s
 
 
+def load_sg_trend_series(filepath=SG_TREND_FILE):
+    if not os.path.exists(filepath):
+        return None
+
+    df = pd.read_csv(filepath, header=None)
+    if df.shape[1] < 2:
+        raise ValueError("SG Trend Datei hat zu wenige Spalten")
+
+    df = df.iloc[:, :2].copy()
+    df.columns = ["date", "value"]
+
+    df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    df = df.dropna(subset=["date", "value"]).sort_values("date")
+    if df.empty:
+        raise ValueError("SG Trend Datei enthält keine verwertbaren Daten")
+
+    s = pd.Series(df["value"].values, index=df["date"], name="managed_futures")
+    s = s[~s.index.duplicated(keep="last")]
+
+    if s.empty:
+        raise ValueError("SG Trend Serie ist leer")
+
+    return s
+
+
+def load_asset_series(asset):
+    if asset == "managed_futures":
+        sg_series = load_sg_trend_series()
+        if sg_series is not None and not sg_series.empty:
+            return sg_series.resample("ME").last()
+
+    ticker = DEFAULT_TICKERS[asset]
+    df = yf.download(ticker, start=START_DATE, auto_adjust=True, progress=False)
+    s = extract_close_series(df, ticker)
+    if s is None or s.empty:
+        return None
+    return s.resample("ME").last()
+
+
 def load_data(use_mf):
     base, assets = get_regime(use_mf)
 
     price_series = {}
 
     for asset in assets:
-        ticker = DEFAULT_TICKERS[asset]
         try:
-            df = yf.download(ticker, start=START_DATE, auto_adjust=True, progress=False)
-            s = extract_close_series(df, ticker)
+            s = load_asset_series(asset)
             if s is None or s.empty:
                 continue
-            price_series[asset] = s.resample("ME").last()
+            price_series[asset] = s
         except Exception:
             continue
 
@@ -104,7 +148,7 @@ def load_data(use_mf):
     returns = {}
     for asset in prices.columns:
         s = prices[asset]
-        if asset == "cash":
+        if asset == RISK_FREE_ASSET:
             returns[asset] = (pd.to_numeric(s, errors="coerce") / 100.0) / 12.0
         else:
             returns[asset] = pd.to_numeric(s, errors="coerce").pct_change()
@@ -141,99 +185,90 @@ def ret(prices, asset, i, n):
 
 
 def get_momentum_ranks(prices, i, assets):
-    """Berechnet den Rang basierend auf dem Durchschnitt von 3, 6 und 12 Monaten Momentum."""
     moms = {}
     for asset in assets:
-        if asset == "cash": continue
-        # Durchschnittliches Momentum über 3, 6 und 12 Monate
+        if asset == RISK_FREE_ASSET:
+            continue
         r3 = ret(prices, asset, i, 3)
         r6 = ret(prices, asset, i, 6)
         r12 = ret(prices, asset, i, 12)
         moms[asset] = np.nanmean([r3, r6, r12])
-    
-    # Ranking: Höchstes Momentum = Rang 1
+
     series = pd.Series(moms).sort_values(ascending=False)
     ranks = {asset: rank + 1 for rank, asset in enumerate(series.index)}
     return ranks
 
+
 def is_active_updated(asset, prices, i, prev_active, all_assets):
-    if asset not in prices.columns: return False
-    
-    # Basis: 10-Monats-SMA
+    if asset not in prices.columns:
+        return False
+
     window10 = prices[asset].iloc[i - 9:i + 1]
-    if len(window10) < 10 or window10.isna().any(): return False
+    if len(window10) < 10 or window10.isna().any():
+        return False
     base_signal = prices[asset].iloc[i] > window10.mean()
 
-    # Wenn bereits aktiv, reicht das SMA-Signal (Trend folgen)
     if prev_active:
         return bool(base_signal)
 
-    # Re-Entry Regeln (wenn vorher inaktiv)
     r3 = ret(prices, asset, i, 3)
     r6 = ret(prices, asset, i, 6)
-    
+
     if asset == "equities":
         ranks = get_momentum_ranks(prices, i, all_assets)
-        # 2 von 3: SMA, 3M-Ret > 0, Rang 1 oder 2
         conds = [base_signal, (pd.notna(r3) and r3 > 0), (ranks.get(asset, 99) <= 2)]
         return sum(conds) >= 2
 
     if asset in ["gold", "bonds"]:
-        # 2 von 3: SMA, 3M-Ret > 0, 6M-Ret > 0
         conds = [base_signal, (pd.notna(r3) and r3 > 0), (pd.notna(r6) and r6 > 0)]
         return sum(conds) >= 2
 
     if asset in ["commodities", "managed_futures"]:
-        # Beide müssen erfüllt sein
         return bool(base_signal and pd.notna(r3) and r3 > 0)
 
     return bool(base_signal)
 
+
 def build_weights_with_tilt(prices, i, prev_active, settings):
     use_mf = settings["use_mf"]
     base_config, all_assets = get_regime(use_mf)
-    
-    # 1. Aktivitäts-Status bestimmen
-    active = {a: is_active_updated(a, prices, i, prev_active.get(a, False), list(base_config.keys())) 
-              for a in base_config}
+
+    active = {
+        a: is_active_updated(a, prices, i, prev_active.get(a, False), list(base_config.keys()))
+        for a in base_config
+    }
     actives = [a for a, v in active.items() if v]
     n = len(actives)
 
-    # 2. Cash-Regel nach deiner Vorgabe
     cash_map = {5: 0.03, 4: 0.05, 3: 0.08, 2: 0.11, 1: 0.15, 0: 0.35}
     cash_quote = cash_map.get(n, 0.35)
-    
+
     w = {asset: 0.0 for asset in all_assets}
-    
-    # 3. Spezialfall: 0 Assets aktiv (Defensiv-Hierarchie)
+
     if n == 0:
-        # 35% Cash, Rest defensiv verteilt auf MF, Bonds, Gold
         remaining = 1.0 - 0.35
-        w["managed_futures"] = remaining * 0.5 if "managed_futures" in w else 0
+        w["managed_futures"] = remaining * 0.5 if "managed_futures" in w else 0.0
         w["bonds"] = remaining * 0.3
         w["gold"] = remaining * 0.2
-        w["cash"] = 1.0 - sum(w.values())
+        w[RISK_FREE_ASSET] = 1.0 - sum(w.values())
         return pd.Series(w), active
 
-    # 4. Tilt-Score Berechnung (vereinfacht für "milden Tilt")
-    # Wir nehmen das 6-Monats-Momentum als Tilt-Faktor
     budget = 1.0 - cash_quote
     raw_tilts = {a: max(0.1, 1 + ret(prices, a, i, 6)) for a in actives}
-    
-    # Kombiniere Basisgewicht mit Tilt
+
     total_weighted_base = sum(base_config[a] * raw_tilts[a] for a in actives)
-    
+
     for a in actives:
         w[a] = budget * (base_config[a] * raw_tilts[a]) / total_weighted_base
-    
-    w["cash"] = 1.0 - sum(w.values())
+
+    w[RISK_FREE_ASSET] = 1.0 - sum(w.values())
     return pd.Series(w), active
 
 
 def run(prices, rets, settings):
     base, assets = get_regime(settings["use_mf"])
 
-    required_assets = list(base.keys()) + ["cash"]
+    required_assets = list(base.keys()) + [RISK_FREE_ASSET]
     start = find_start(prices, required_assets)
 
     if start is None:
@@ -243,15 +278,13 @@ def run(prices, rets, settings):
     dates = [prices.index[start]]
 
     prev_w = pd.Series(0.0, index=assets)
-    prev_w["cash"] = 1.0
+    prev_w[RISK_FREE_ASSET] = 1.0
 
     prev_active = {}
     cost_rate = settings["cost"]
     history = []
 
-    # Die Hauptschleife
     for i in range(start, len(prices) - 1):
-        # HIER war der Fehler: Funktionsname und Einrückung müssen passen
         w, active = build_weights_with_tilt(prices, i, prev_active, settings)
 
         if any(asset not in rets.columns for asset in assets):
@@ -287,6 +320,7 @@ def run(prices, rets, settings):
         raise ValueError("Backtest konnte nicht berechnet werden")
 
     return pd.Series(nav, index=dates), history
+
 
 def get_stats(nav, label):
     nav = nav.dropna().astype(float)
@@ -348,6 +382,13 @@ def backtest():
             raise ValueError("Keine gemeinsame Historie zwischen Portfolio und Benchmark")
 
         latest = history[-1] if history else None
+        proxies = {
+            asset: DEFAULT_TICKERS[asset]
+            for asset in get_regime(settings["use_mf"])[1]
+            if asset in DEFAULT_TICKERS
+        }
+        if settings["use_mf"]:
+            proxies["managed_futures"] = "SG_TRD_IDX.TXT" if os.path.exists(SG_TREND_FILE) else DEFAULT_TICKERS["managed_futures"]
 
         return jsonify({
             "summary": [
@@ -363,10 +404,8 @@ def backtest():
             "meta": {
                 "use_managed_futures": settings["use_mf"],
                 "transaction_cost_rate": settings["cost"],
-                "proxies": {
-                    asset: DEFAULT_TICKERS[asset]
-                    for asset in get_regime(settings["use_mf"])[1]
-                }
+                "managed_futures_source": "local_sg_trend_file" if os.path.exists(SG_TREND_FILE) else "yfinance_dbmf",
+                "proxies": proxies
             }
         })
 

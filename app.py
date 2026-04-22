@@ -401,6 +401,7 @@ def backtest():
                 "benchmark": bench.loc[idx].tolist()
             },
             "latest_weights": latest,
+            "history": history,
             "meta": {
                 "use_managed_futures": settings["use_mf"],
                 "transaction_cost_rate": settings["cost"],

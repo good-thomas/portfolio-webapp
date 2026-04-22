@@ -13,6 +13,10 @@ START_DATE = "2000-01-01"
 ROLLING_VOL_MONTHS = 6
 RISK_FREE_ASSET = "cash"
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+SG_TREND_FILE = os.path.join(DATA_DIR, "SG_TRD_IDX.TXT")
+
 DEFAULT_TICKERS = {
     "equities": "ACWI",
     "bonds": "IEF",
@@ -65,18 +69,58 @@ def extract_close_series(df, ticker):
     return s
 
 
+def load_sg_trend_series(filepath=SG_TREND_FILE):
+    if not os.path.exists(filepath):
+        return None
+
+    df = pd.read_csv(filepath, header=None)
+
+    if df.shape[1] < 2:
+        raise ValueError("SG Trend Datei hat zu wenige Spalten")
+
+    df = df.iloc[:, :2].copy()
+    df.columns = ["date", "value"]
+
+    df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    df = df.dropna(subset=["date", "value"]).sort_values("date")
+    if df.empty:
+        raise ValueError("SG Trend Datei enthält keine verwertbaren Daten")
+
+    s = pd.Series(df["value"].values, index=df["date"], name="managed_futures")
+    s = s[~s.index.duplicated(keep="last")]
+
+    if s.empty:
+        raise ValueError("SG Trend Serie ist leer")
+
+    return s
+
+
+def load_asset_series(asset):
+    if asset == "managed_futures":
+        sg_series = load_sg_trend_series()
+        if sg_series is not None and not sg_series.empty:
+            return sg_series.resample("ME").last()
+
+    ticker = DEFAULT_TICKERS[asset]
+    df = yf.download(ticker, start=START_DATE, auto_adjust=True, progress=False)
+    s = extract_close_series(df, ticker)
+    if s is None or s.empty:
+        return None
+    return s.resample("ME").last()
+
+
 def load_data(use_mf=True, include_bitcoin=True):
     risky_assets, all_assets = get_universe(use_mf, include_bitcoin)
     price_series = {}
 
     for asset in all_assets:
-        ticker = DEFAULT_TICKERS[asset]
         try:
-            df = yf.download(ticker, start=START_DATE, auto_adjust=True, progress=False)
-            s = extract_close_series(df, ticker)
+            s = load_asset_series(asset)
             if s is None or s.empty:
                 continue
-            price_series[asset] = s.resample("ME").last()
+            price_series[asset] = s
         except Exception:
             continue
 
@@ -418,6 +462,10 @@ def backtest_v2():
         latest = history[-1] if history else None
         risky_assets, all_assets = get_universe(settings["use_mf"], settings["include_bitcoin"])
 
+        proxies = {asset: DEFAULT_TICKERS[asset] for asset in all_assets if asset in DEFAULT_TICKERS}
+        if settings["use_mf"]:
+            proxies["managed_futures"] = "SG_TRD_IDX.TXT" if os.path.exists(SG_TREND_FILE) else DEFAULT_TICKERS["managed_futures"]
+
         return jsonify({
             "summary": [
                 get_stats(nav.loc[idx], "Portfolio V2"),
@@ -439,7 +487,8 @@ def backtest_v2():
                 "ranking_method": "pairwise_wins_on_weighted_momentum_div_vol",
                 "weighting_method": "score_proportional_then_risk_targeted",
                 "selected_count": 3,
-                "proxies": {asset: DEFAULT_TICKERS[asset] for asset in all_assets}
+                "managed_futures_source": "local_sg_trend_file" if os.path.exists(SG_TREND_FILE) else "yfinance_dbmf",
+                "proxies": proxies
             }
         })
 

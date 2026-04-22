@@ -69,6 +69,16 @@ def extract_close_series(df, ticker):
     return s
 
 
+def safe_std(series):
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if len(s) < 2:
+        return np.nan
+    std = s.std()
+    if pd.isna(std) or std <= 0:
+        return np.nan
+    return float(std)
+
+
 def load_sg_trend_series(filepath=SG_TREND_FILE):
     if not os.path.exists(filepath):
         return None
@@ -195,17 +205,17 @@ def compute_asset_score(prices, rets, asset, i):
     r6 = ret(prices, asset, i, 6)
     r12 = ret(prices, asset, i, 12)
 
+    if pd.isna(r3) or pd.isna(r6) or pd.isna(r12):
+        return np.nan
+
     momentum = 0.25 * r3 + 0.50 * r6 + 0.25 * r12
 
     if asset not in rets.columns or i < ROLLING_VOL_MONTHS:
         return np.nan
 
-    vol_window = pd.to_numeric(rets[asset].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1], errors="coerce").dropna()
-    if len(vol_window) < ROLLING_VOL_MONTHS:
-        return np.nan
-
-    vol = vol_window.std()
-    if pd.isna(vol) or vol <= 0:
+    vol_window = rets[asset].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1]
+    vol = safe_std(vol_window)
+    if pd.isna(vol):
         return np.nan
 
     return momentum / vol
@@ -244,8 +254,8 @@ def run_pairwise_ranking(prices, rets, i, risky_assets):
                     else:
                         wins[b] += 1
                 else:
-                    vol_a = pd.to_numeric(rets[a].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1], errors="coerce").dropna().std()
-                    vol_b = pd.to_numeric(rets[b].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1], errors="coerce").dropna().std()
+                    vol_a = safe_std(rets[a].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1]) if a in rets.columns and i >= ROLLING_VOL_MONTHS else np.nan
+                    vol_b = safe_std(rets[b].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1]) if b in rets.columns and i >= ROLLING_VOL_MONTHS else np.nan
                     if pd.notna(vol_a) and pd.notna(vol_b):
                         if vol_a < vol_b:
                             wins[a] += 1
@@ -257,8 +267,8 @@ def run_pairwise_ranking(prices, rets, i, risky_assets):
         key=lambda asset: (
             wins.get(asset, 0),
             ret(prices, asset, i, 12) if pd.notna(ret(prices, asset, i, 12)) else -999,
-            -(pd.to_numeric(rets[asset].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1], errors="coerce").dropna().std()
-              if asset in rets.columns and i >= ROLLING_VOL_MONTHS else 999)
+            -(safe_std(rets[asset].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1])
+              if asset in rets.columns and i >= ROLLING_VOL_MONTHS and pd.notna(safe_std(rets[asset].iloc[i - ROLLING_VOL_MONTHS + 1:i + 1])) else 999)
         ),
         reverse=True
     )
@@ -294,7 +304,10 @@ def build_risk_targeted_weights(prices, rets, i, risky_assets, risk_factor):
         positive_scores = {a: 1.0 for a in top3}
 
     score_sum = sum(positive_scores.values())
-    raw_weights = {a: positive_scores[a] / score_sum for a in top3}
+    if score_sum <= 0:
+        raw_weights = {a: 1.0 / len(top3) for a in top3}
+    else:
+        raw_weights = {a: positive_scores[a] / score_sum for a in top3}
 
     bench_assets = ["equities", "bonds"]
     if any(a not in rets.columns for a in bench_assets):
@@ -311,7 +324,7 @@ def build_risk_targeted_weights(prices, rets, i, risky_assets, risk_factor):
     raw_vector = [raw_weights[a] for a in top3]
     raw_vol = compute_portfolio_vol(raw_vector, top_cov)
 
-    if raw_vol <= 0:
+    if raw_vol <= 0 or pd.isna(raw_vol) or pd.isna(benchmark_vol):
         invest_scale = 0.0
     else:
         target_vol = benchmark_vol * float(risk_factor)
@@ -328,9 +341,9 @@ def build_risk_targeted_weights(prices, rets, i, risky_assets, risk_factor):
         "ranking": ranking,
         "selected_assets": top3,
         "raw_weights": raw_weights,
-        "benchmark_vol_monthly": float(benchmark_vol),
-        "raw_portfolio_vol_monthly": float(raw_vol),
-        "target_vol_monthly": float(benchmark_vol * float(risk_factor)),
+        "benchmark_vol_monthly": None if pd.isna(benchmark_vol) else float(benchmark_vol),
+        "raw_portfolio_vol_monthly": None if pd.isna(raw_vol) else float(raw_vol),
+        "target_vol_monthly": None if pd.isna(benchmark_vol) else float(benchmark_vol * float(risk_factor)),
         "invest_scale": float(invest_scale)
     }
 

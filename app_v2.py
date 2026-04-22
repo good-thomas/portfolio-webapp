@@ -18,7 +18,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 SG_TREND_FILE = os.path.join(DATA_DIR, "SG_TRD_IDX.TXT")
 
 DEFAULT_TICKERS = {
-    "equities": "SPY",
+    "equities": "ACWI",
     "bonds": "IEF",
     "gold": "GLD",
     "commodities": "DBC",

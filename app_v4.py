@@ -17,6 +17,8 @@ DEFAULT_COST_RATE = 0.001
 DEFAULT_SECTOR_ALPHA_MAX = 0.15
 MAX_SECTOR_ALPHA_MAX = 0.50
 SECTOR_EDGE_POWER = 1.5
+SECTOR_EQUAL_WEIGHT_BLEND = 0.70
+SECTOR_EDGE_WEIGHT_BLEND = 0.30
 DEFAULT_SECTOR_PROXY_SET = "us_long_history"
 ALLOWED_SECTOR_PROXY_SETS = {"ucits", "us_long_history"}
 BASE_DIR = Path(__file__).resolve().parent
@@ -254,10 +256,11 @@ def compute_dynamic_sector_alpha(top_buckets, bucket_scores, equity_benchmark_sc
     return float(equity_alpha), float(scale), avg_relative_edge, max_relative_edge
 
 
-def compute_edge_weighted_sector_weights(top_buckets, bucket_scores, equity_benchmark_score, equity_alpha, power=SECTOR_EDGE_POWER):
+def compute_blended_sector_weights(top_buckets, bucket_scores, equity_benchmark_score, equity_alpha, power=SECTOR_EDGE_POWER):
     if not top_buckets or equity_alpha <= 0 or pd.isna(equity_benchmark_score):
-        return {}, {}, {}
+        return {}, {}, {}, {}, {}
 
+    equal_weights = {b: equity_alpha / len(top_buckets) for b in top_buckets}
     edges = {
         b: max(0.0, float(bucket_scores[b] - equity_benchmark_score))
         for b in top_buckets
@@ -267,12 +270,22 @@ def compute_edge_weighted_sector_weights(top_buckets, bucket_scores, equity_benc
     power_sum = sum(edge_power_scores.values())
 
     if power_sum <= 0:
-        equal_weight = equity_alpha / len(top_buckets)
-        sector_weights = {b: equal_weight for b in top_buckets}
+        edge_weights = dict(equal_weights)
     else:
-        sector_weights = {b: equity_alpha * edge_power_scores[b] / power_sum for b in edge_power_scores}
+        edge_weights = {b: equity_alpha * edge_power_scores[b] / power_sum for b in edge_power_scores}
 
-    return sector_weights, edges, edge_power_scores
+    blended_weights = {}
+    for b in top_buckets:
+        blended_weights[b] = (
+            SECTOR_EQUAL_WEIGHT_BLEND * equal_weights.get(b, 0.0)
+            + SECTOR_EDGE_WEIGHT_BLEND * edge_weights.get(b, 0.0)
+        )
+
+    total = sum(blended_weights.values())
+    if total > 0:
+        blended_weights = {b: equity_alpha * w / total for b, w in blended_weights.items()}
+
+    return blended_weights, equal_weights, edge_weights, edges, edge_power_scores
 
 
 def clamp_sector_alpha_max(value):
@@ -352,7 +365,7 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         available_equity_weight=w_step.get("equities", 0.0)
     )
 
-    sector_weights, sector_edges, sector_edge_power_scores = compute_edge_weighted_sector_weights(
+    sector_weights, sector_equal_weights, sector_edge_weights, sector_edges, sector_edge_power_scores = compute_blended_sector_weights(
         top_buckets=top_buckets,
         bucket_scores=bucket_scores,
         equity_benchmark_score=equity_benchmark_score,
@@ -390,10 +403,14 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         "avg_sector_relative_edge": float(avg_sector_relative_edge),
         "max_sector_relative_edge": float(max_sector_relative_edge),
         "sector_weighting_power": float(SECTOR_EDGE_POWER),
+        "sector_equal_weight_blend": float(SECTOR_EQUAL_WEIGHT_BLEND),
+        "sector_edge_weight_blend": float(SECTOR_EDGE_WEIGHT_BLEND),
         "sector_edges": {k: float(v) for k, v in sector_edges.items()},
         "sector_edge_power_scores": {k: float(v) for k, v in sector_edge_power_scores.items()},
+        "sector_equal_weights": {k: float(v) for k, v in sector_equal_weights.items()},
+        "sector_edge_weights": {k: float(v) for k, v in sector_edge_weights.items()},
         "sector_weights": {k: float(v) for k, v in sector_weights.items()},
-        "weighting_method": "v4_4_edge_power_weighted_sector_alpha"
+        "weighting_method": "v4_5_blended_sector_alpha_70_equal_30_edge_power"
     }
     return current_weights, diagnostics
 
@@ -487,7 +504,7 @@ def backtest_v4():
         proxies.update({bucket: ticker for bucket, ticker in gics_buckets.items()})
 
         return jsonify({
-            "summary": [get_stats(nav.loc[idx], "Portfolio V4.4"), get_stats(bench.loc[idx], "Benchmark 70/30")],
+            "summary": [get_stats(nav.loc[idx], "Portfolio V4.5"), get_stats(bench.loc[idx], "Benchmark 70/30")],
             "chart": {"dates": [d.strftime("%Y-%m-%d") for d in idx], "portfolio": nav.loc[idx].tolist(), "benchmark": bench.loc[idx].tolist()},
             "latest_weights": history[-1] if history else None,
             "history": history,
@@ -505,9 +522,9 @@ def backtest_v4():
                 "minimum_core_assets": MIN_CORE_ASSETS,
                 "lookback_months": LOOKBACK_MONTHS,
                 "ranking_method": "weighted_3m_6m_12m_momentum_with_sector_relative_strength_filter",
-                "weighting_method": "v4_4_edge_power_weighted_sector_alpha",
+                "weighting_method": "v4_5_blended_sector_alpha_70_equal_30_edge_power",
                 "sector_alpha_scaling": "ambitious: avg_top3_relative_edge_vs_equities <=0 => 0%, <2pp => 66%, >=2pp => 100% of sector_alpha_max",
-                "sector_weighting": "sector weights proportional to max(0, sector_score - equity_score)^1.5",
+                "sector_weighting": "sector weights = 70% equal weight + 30% proportional to max(0, sector_score - equity_score)^1.5",
                 "selected_asset_count": 3,
                 "selected_sector_count": 3,
                 "managed_futures_source": "local_sg_trend_file" if SG_TREND_FILE.exists() else "yfinance_dbmf",

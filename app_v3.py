@@ -16,6 +16,8 @@ LOOKBACK_MONTHS = 12
 DEFAULT_COST_RATE = 0.001
 DEFAULT_SECTOR_ALPHA_MAX = 0.15
 MAX_SECTOR_ALPHA_MAX = 0.50
+DEFAULT_SECTOR_PROXY_SET = "us_long_history"
+ALLOWED_SECTOR_PROXY_SETS = {"ucits", "us_long_history"}
 BASE_DIR = Path(__file__).resolve().parent
 SG_TREND_FILE = BASE_DIR / "data" / "SG_TRD_IDX.TXT"
 SG_TREND_COLUMN = "managed_futures"
@@ -40,7 +42,7 @@ DEFAULT_TICKERS = {
     "cash": "^IRX"
 }
 
-GICS_BUCKETS = {
+GICS_BUCKETS_UCITS = {
     "energy": "WNRG.DE", "materials": "XMWS.DE", "defense": "DFND.L",
     "industrials_ex": "WIND.DE", "cons_disc": "SC0G.DE", "cons_staples": "WCSS.DE",
     "pharma_bio": "BIOT.DE", "hc_equip": "IHI", "banks": "EXV1.DE",
@@ -48,7 +50,43 @@ GICS_BUCKETS = {
     "comm_serv": "XWTS.DE", "utilities": "WUTI.DE", "real_estate": "DPRE.DE"
 }
 
+GICS_BUCKETS_US_LONG_HISTORY = {
+    "energy": "XLE",
+    "materials": "XLB",
+    "industrials": "XLI",
+    "cons_disc": "XLY",
+    "cons_staples": "XLP",
+    "health_care": "XLV",
+    "financials": "XLF",
+    "technology": "XLK",
+    "utilities": "XLU",
+    "real_estate": "IYR",
+    "semis": "SMH",
+    "biotech": "IBB",
+    "hc_equip": "IHI",
+    "banks": "KBE",
+    "aerospace_defense": "ITA",
+    "infrastructure": "PAVE",
+    "homebuilders": "XHB",
+    "transportation": "IYT",
+    "gold_miners": "GDX",
+    "oil_services": "OIH",
+    "metals_mining": "XME",
+    "software": "IGV"
+}
+
+SECTOR_PROXY_SETS = {
+    "ucits": GICS_BUCKETS_UCITS,
+    "us_long_history": GICS_BUCKETS_US_LONG_HISTORY
+}
+
 BENCHMARK_WEIGHTS = {"equities": 0.70, "bonds": 0.30}
+
+
+def get_sector_buckets(sector_proxy_set):
+    if sector_proxy_set not in SECTOR_PROXY_SETS:
+        raise ValueError("sector_proxy_set muss einer dieser Werte sein: " + ", ".join(sorted(ALLOWED_SECTOR_PROXY_SETS)))
+    return SECTOR_PROXY_SETS[sector_proxy_set]
 
 
 def extract_close_series(df, ticker):
@@ -98,9 +136,10 @@ def load_asset_series(asset):
     return s.resample("ME").last()
 
 
-def load_data(include_bitcoin=True):
+def load_data(include_bitcoin=True, sector_proxy_set=DEFAULT_SECTOR_PROXY_SET):
+    gics_buckets = get_sector_buckets(sector_proxy_set)
     assets = [a for a in NEUTRAL_WEIGHTS.keys() if include_bitcoin or a != "bitcoin"]
-    yf_tickers = [DEFAULT_TICKERS[a] for a in assets if a != "managed_futures"] + list(GICS_BUCKETS.values())
+    yf_tickers = [DEFAULT_TICKERS[a] for a in assets if a != "managed_futures"] + list(gics_buckets.values())
     data = yf.download(yf_tickers, start=START_DATE, auto_adjust=True, progress=False)["Close"]
     if isinstance(data, pd.Series):
         data = data.to_frame(yf_tickers[0])
@@ -118,7 +157,7 @@ def load_data(include_bitcoin=True):
         except Exception:
             continue
 
-    for bucket, ticker in GICS_BUCKETS.items():
+    for bucket, ticker in gics_buckets.items():
         try:
             if ticker in data.columns:
                 series[bucket] = pd.to_numeric(data[ticker], errors="coerce").resample("ME").last()
@@ -137,7 +176,7 @@ def load_data(include_bitcoin=True):
             returns[col] = (pd.to_numeric(prices[col], errors="coerce") / 100.0) / 12.0
         else:
             returns[col] = pd.to_numeric(prices[col], errors="coerce").pct_change()
-    return prices, pd.DataFrame(returns).sort_index()
+    return prices, pd.DataFrame(returns).sort_index(), gics_buckets
 
 
 def has_lookback(prices, asset, i, lookback=LOOKBACK_MONTHS):
@@ -199,7 +238,16 @@ def clamp_sector_alpha_max(value):
     return min(MAX_SECTOR_ALPHA_MAX, max(0.0, value))
 
 
-def build_v3_weights(prices, i, include_bitcoin=True, sector_alpha_max=DEFAULT_SECTOR_ALPHA_MAX):
+def resolve_sector_proxy_set(value):
+    if value is None:
+        return DEFAULT_SECTOR_PROXY_SET
+    value = str(value).strip()
+    if value not in ALLOWED_SECTOR_PROXY_SETS:
+        raise ValueError("sector_proxy_set muss einer dieser Werte sein: " + ", ".join(sorted(ALLOWED_SECTOR_PROXY_SETS)))
+    return value
+
+
+def build_v3_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha_max=DEFAULT_SECTOR_ALPHA_MAX):
     configured_assets = [a for a in NEUTRAL_WEIGHTS if include_bitcoin or a != "bitcoin"]
     available_assets = [a for a in configured_assets if has_lookback(prices, a, i)]
     if not available_assets:
@@ -230,7 +278,7 @@ def build_v3_weights(prices, i, include_bitcoin=True, sector_alpha_max=DEFAULT_S
         w_step["bonds"] -= total_boost * 0.3
     w_step = {k: max(0.0, v) for k, v in w_step.items()}
 
-    available_buckets = [b for b in GICS_BUCKETS if has_lookback(prices, b, i)]
+    available_buckets = [b for b in gics_buckets if has_lookback(prices, b, i)]
     bucket_scores = {b: compute_score(prices, b, i) for b in available_buckets}
     top_buckets = sorted(bucket_scores, key=lambda b: bucket_scores[b] if pd.notna(bucket_scores[b]) else -999, reverse=True)[:3]
 
@@ -264,7 +312,7 @@ def build_v3_weights(prices, i, include_bitcoin=True, sector_alpha_max=DEFAULT_S
     return current_weights, diagnostics
 
 
-def run(prices, rets, settings):
+def run(prices, rets, settings, gics_buckets):
     include_bitcoin = settings["include_bitcoin"]
     start = resolve_start_index(prices, settings.get("start_date"))
 
@@ -277,6 +325,7 @@ def run(prices, rets, settings):
         w, diagnostics = build_v3_weights(
             prices,
             i,
+            gics_buckets,
             include_bitcoin=include_bitcoin,
             sector_alpha_max=settings["sector_alpha_max"]
         )
@@ -331,10 +380,11 @@ def backtest_v3():
             "include_bitcoin": bool(data.get("include_bitcoin", True)),
             "cost": float(data.get("transaction_cost_rate", DEFAULT_COST_RATE)),
             "start_date": data.get("start_date"),
-            "sector_alpha_max": clamp_sector_alpha_max(data.get("sector_alpha_max", DEFAULT_SECTOR_ALPHA_MAX))
+            "sector_alpha_max": clamp_sector_alpha_max(data.get("sector_alpha_max", DEFAULT_SECTOR_ALPHA_MAX)),
+            "sector_proxy_set": resolve_sector_proxy_set(data.get("sector_proxy_set", DEFAULT_SECTOR_PROXY_SET))
         }
-        prices, rets = load_data(settings["include_bitcoin"])
-        nav, history = run(prices, rets, settings)
+        prices, rets, gics_buckets = load_data(settings["include_bitcoin"], settings["sector_proxy_set"])
+        nav, history = run(prices, rets, settings, gics_buckets)
 
         if "equities" not in rets.columns or "bonds" not in rets.columns:
             raise ValueError("Benchmark-Daten fehlen")
@@ -345,10 +395,10 @@ def backtest_v3():
             raise ValueError("Keine gemeinsame Historie zwischen Portfolio und Benchmark")
 
         assets = [a for a in NEUTRAL_WEIGHTS if settings["include_bitcoin"] or a != "bitcoin"]
-        availability = compute_availability(prices, assets, GICS_BUCKETS.keys())
+        availability = compute_availability(prices, assets, gics_buckets.keys())
         proxies = {asset: DEFAULT_TICKERS[asset] for asset in NEUTRAL_WEIGHTS if asset in DEFAULT_TICKERS}
         proxies["managed_futures"] = "data/SG_TRD_IDX.TXT" if SG_TREND_FILE.exists() else DEFAULT_TICKERS["managed_futures"]
-        proxies.update({bucket: ticker for bucket, ticker in GICS_BUCKETS.items()})
+        proxies.update({bucket: ticker for bucket, ticker in gics_buckets.items()})
 
         return jsonify({
             "summary": [get_stats(nav.loc[idx], "Portfolio V3"), get_stats(bench.loc[idx], "Benchmark 70/30")],
@@ -360,6 +410,8 @@ def backtest_v3():
                 "transaction_cost_rate": settings["cost"],
                 "sector_alpha_max": settings["sector_alpha_max"],
                 "sector_alpha_max_allowed": MAX_SECTOR_ALPHA_MAX,
+                "sector_proxy_set": settings["sector_proxy_set"],
+                "allowed_sector_proxy_sets": sorted(ALLOWED_SECTOR_PROXY_SETS),
                 "start_date": settings["start_date"],
                 "actual_start_date": idx[0].strftime("%Y-%m-%d"),
                 "data_mode": "rolling_available_universe",

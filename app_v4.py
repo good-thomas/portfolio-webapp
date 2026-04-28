@@ -16,6 +16,7 @@ LOOKBACK_MONTHS = 12
 DEFAULT_COST_RATE = 0.001
 DEFAULT_SECTOR_ALPHA_MAX = 0.15
 MAX_SECTOR_ALPHA_MAX = 0.50
+SECTOR_EDGE_POWER = 1.5
 DEFAULT_SECTOR_PROXY_SET = "us_long_history"
 ALLOWED_SECTOR_PROXY_SETS = {"ucits", "us_long_history"}
 BASE_DIR = Path(__file__).resolve().parent
@@ -253,6 +254,27 @@ def compute_dynamic_sector_alpha(top_buckets, bucket_scores, equity_benchmark_sc
     return float(equity_alpha), float(scale), avg_relative_edge, max_relative_edge
 
 
+def compute_edge_weighted_sector_weights(top_buckets, bucket_scores, equity_benchmark_score, equity_alpha, power=SECTOR_EDGE_POWER):
+    if not top_buckets or equity_alpha <= 0 or pd.isna(equity_benchmark_score):
+        return {}, {}, {}
+
+    edges = {
+        b: max(0.0, float(bucket_scores[b] - equity_benchmark_score))
+        for b in top_buckets
+        if pd.notna(bucket_scores.get(b))
+    }
+    edge_power_scores = {b: edge ** power for b, edge in edges.items()}
+    power_sum = sum(edge_power_scores.values())
+
+    if power_sum <= 0:
+        equal_weight = equity_alpha / len(top_buckets)
+        sector_weights = {b: equal_weight for b in top_buckets}
+    else:
+        sector_weights = {b: equity_alpha * edge_power_scores[b] / power_sum for b in edge_power_scores}
+
+    return sector_weights, edges, edge_power_scores
+
+
 def clamp_sector_alpha_max(value):
     if value is None:
         return DEFAULT_SECTOR_ALPHA_MAX
@@ -330,13 +352,21 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         available_equity_weight=w_step.get("equities", 0.0)
     )
 
+    sector_weights, sector_edges, sector_edge_power_scores = compute_edge_weighted_sector_weights(
+        top_buckets=top_buckets,
+        bucket_scores=bucket_scores,
+        equity_benchmark_score=equity_benchmark_score,
+        equity_alpha=equity_alpha,
+        power=SECTOR_EDGE_POWER
+    )
+
     current_weights = pd.Series(0.0, index=prices.columns)
 
     for asset, weight in w_step.items():
         if asset == "equities":
             current_weights["equities"] = max(0.0, weight - equity_alpha)
-            for tb in top_buckets:
-                current_weights[tb] = equity_alpha / len(top_buckets)
+            for tb, tb_weight in sector_weights.items():
+                current_weights[tb] = tb_weight
         else:
             current_weights[asset] = max(0.0, weight)
 
@@ -359,7 +389,11 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         "sector_alpha_scale": float(sector_alpha_scale),
         "avg_sector_relative_edge": float(avg_sector_relative_edge),
         "max_sector_relative_edge": float(max_sector_relative_edge),
-        "weighting_method": "v4_3_ambitious_dynamic_sector_alpha"
+        "sector_weighting_power": float(SECTOR_EDGE_POWER),
+        "sector_edges": {k: float(v) for k, v in sector_edges.items()},
+        "sector_edge_power_scores": {k: float(v) for k, v in sector_edge_power_scores.items()},
+        "sector_weights": {k: float(v) for k, v in sector_weights.items()},
+        "weighting_method": "v4_4_edge_power_weighted_sector_alpha"
     }
     return current_weights, diagnostics
 
@@ -453,7 +487,7 @@ def backtest_v4():
         proxies.update({bucket: ticker for bucket, ticker in gics_buckets.items()})
 
         return jsonify({
-            "summary": [get_stats(nav.loc[idx], "Portfolio V4.3"), get_stats(bench.loc[idx], "Benchmark 70/30")],
+            "summary": [get_stats(nav.loc[idx], "Portfolio V4.4"), get_stats(bench.loc[idx], "Benchmark 70/30")],
             "chart": {"dates": [d.strftime("%Y-%m-%d") for d in idx], "portfolio": nav.loc[idx].tolist(), "benchmark": bench.loc[idx].tolist()},
             "latest_weights": history[-1] if history else None,
             "history": history,
@@ -471,8 +505,9 @@ def backtest_v4():
                 "minimum_core_assets": MIN_CORE_ASSETS,
                 "lookback_months": LOOKBACK_MONTHS,
                 "ranking_method": "weighted_3m_6m_12m_momentum_with_sector_relative_strength_filter",
-                "weighting_method": "v4_3_ambitious_dynamic_sector_alpha",
+                "weighting_method": "v4_4_edge_power_weighted_sector_alpha",
                 "sector_alpha_scaling": "ambitious: avg_top3_relative_edge_vs_equities <=0 => 0%, <2pp => 66%, >=2pp => 100% of sector_alpha_max",
+                "sector_weighting": "sector weights proportional to max(0, sector_score - equity_score)^1.5",
                 "selected_asset_count": 3,
                 "selected_sector_count": 3,
                 "managed_futures_source": "local_sg_trend_file" if SG_TREND_FILE.exists() else "yfinance_dbmf",

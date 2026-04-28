@@ -14,6 +14,8 @@ CORS(app)
 START_DATE = "2000-01-01"
 LOOKBACK_MONTHS = 12
 DEFAULT_COST_RATE = 0.001
+DEFAULT_SECTOR_ALPHA_MAX = 0.15
+MAX_SECTOR_ALPHA_MAX = 0.50
 BASE_DIR = Path(__file__).resolve().parent
 SG_TREND_FILE = BASE_DIR / "data" / "SG_TRD_IDX.TXT"
 SG_TREND_COLUMN = "managed_futures"
@@ -185,7 +187,19 @@ def compute_score(prices, asset, i):
     return 0.5 * (p_now / p3 - 1) + 0.3 * (p_now / p6 - 1) + 0.2 * (p_now / p12 - 1)
 
 
-def build_v3_weights(prices, i, include_bitcoin=True):
+def clamp_sector_alpha_max(value):
+    if value is None:
+        return DEFAULT_SECTOR_ALPHA_MAX
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("sector_alpha_max muss eine Zahl zwischen 0.0 und 0.5 sein")
+    if not np.isfinite(value):
+        raise ValueError("sector_alpha_max muss eine endliche Zahl zwischen 0.0 und 0.5 sein")
+    return min(MAX_SECTOR_ALPHA_MAX, max(0.0, value))
+
+
+def build_v3_weights(prices, i, include_bitcoin=True, sector_alpha_max=DEFAULT_SECTOR_ALPHA_MAX):
     configured_assets = [a for a in NEUTRAL_WEIGHTS if include_bitcoin or a != "bitcoin"]
     available_assets = [a for a in configured_assets if has_lookback(prices, a, i)]
     if not available_assets:
@@ -221,7 +235,7 @@ def build_v3_weights(prices, i, include_bitcoin=True):
     top_buckets = sorted(bucket_scores, key=lambda b: bucket_scores[b] if pd.notna(bucket_scores[b]) else -999, reverse=True)[:3]
 
     current_weights = pd.Series(0.0, index=prices.columns)
-    equity_alpha = min(0.15, max(0.0, w_step.get("equities", 0.0))) if top_buckets else 0.0
+    equity_alpha = min(sector_alpha_max, max(0.0, w_step.get("equities", 0.0))) if top_buckets else 0.0
 
     for asset, weight in w_step.items():
         if asset == "equities":
@@ -243,6 +257,8 @@ def build_v3_weights(prices, i, include_bitcoin=True):
         "selected_assets": top3,
         "bucket_scores": {k: None if pd.isna(v) else float(v) for k, v in bucket_scores.items()},
         "selected_buckets": top_buckets,
+        "sector_alpha_max": float(sector_alpha_max),
+        "sector_alpha_used": float(equity_alpha),
         "weighting_method": "rolling_available_universe_method_a_relative_neutral_weights"
     }
     return current_weights, diagnostics
@@ -258,7 +274,12 @@ def run(prices, rets, settings):
     history = []
 
     for i in range(start, len(prices) - 1):
-        w, diagnostics = build_v3_weights(prices, i, include_bitcoin=include_bitcoin)
+        w, diagnostics = build_v3_weights(
+            prices,
+            i,
+            include_bitcoin=include_bitcoin,
+            sector_alpha_max=settings["sector_alpha_max"]
+        )
         r = rets.reindex(columns=w.index).iloc[i + 1]
         tradable = r.notna()
         w = w.where(tradable, 0.0)
@@ -309,7 +330,8 @@ def backtest_v3():
         settings = {
             "include_bitcoin": bool(data.get("include_bitcoin", True)),
             "cost": float(data.get("transaction_cost_rate", DEFAULT_COST_RATE)),
-            "start_date": data.get("start_date")
+            "start_date": data.get("start_date"),
+            "sector_alpha_max": clamp_sector_alpha_max(data.get("sector_alpha_max", DEFAULT_SECTOR_ALPHA_MAX))
         }
         prices, rets = load_data(settings["include_bitcoin"])
         nav, history = run(prices, rets, settings)
@@ -336,6 +358,8 @@ def backtest_v3():
             "meta": {
                 "include_bitcoin": settings["include_bitcoin"],
                 "transaction_cost_rate": settings["cost"],
+                "sector_alpha_max": settings["sector_alpha_max"],
+                "sector_alpha_max_allowed": MAX_SECTOR_ALPHA_MAX,
                 "start_date": settings["start_date"],
                 "actual_start_date": idx[0].strftime("%Y-%m-%d"),
                 "data_mode": "rolling_available_universe",

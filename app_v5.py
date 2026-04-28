@@ -31,6 +31,13 @@ RISK_FREE_ASSET = "cash"
 EQUITY_ENGINE_ASSET = "equity_engine"
 MIN_CORE_ASSETS = ["equities", "bonds", "managed_futures", "gold", "cash"]
 
+BENCHMARK_RELATIVE_FILTER = True
+BENCHMARK_FALLBACK_MODE = "benchmark"
+EQUITY_ENGINE_MIN_TOP1 = 0.60
+EQUITY_ENGINE_MIN_STRONG_TOP1 = 0.70
+EQUITY_ENGINE_STRONG_EDGE = 0.05
+EQUITY_ENGINE_MIN_TOP2 = 0.55
+
 NEUTRAL_WEIGHTS = {
     EQUITY_ENGINE_ASSET: 0.50,
     "bonds": 0.20,
@@ -235,6 +242,14 @@ def compute_score(prices, asset, i):
     return 0.5 * (p_now / p3 - 1) + 0.3 * (p_now / p6 - 1) + 0.2 * (p_now / p12 - 1)
 
 
+def compute_benchmark_score(prices, i):
+    equity_score = compute_score(prices, "equities", i)
+    bond_score = compute_score(prices, "bonds", i)
+    if pd.isna(equity_score) or pd.isna(bond_score):
+        return np.nan
+    return BENCHMARK_WEIGHTS["equities"] * equity_score + BENCHMARK_WEIGHTS["bonds"] * bond_score
+
+
 def clamp_factor_max(value):
     if value is None:
         return DEFAULT_EQUITY_FACTOR_MAX
@@ -376,6 +391,68 @@ def score_from_weights(prices, i, weights):
     return float(sum(vals)) if vals else np.nan
 
 
+def weighted_score(asset_weights, asset_scores):
+    total = 0.0
+    used = 0.0
+    for asset, weight in asset_weights.items():
+        if asset == RISK_FREE_ASSET:
+            score = 0.0
+        else:
+            score = asset_scores.get(asset, np.nan)
+        if pd.notna(score):
+            total += float(weight) * float(score)
+            used += float(weight)
+    return total / used if used > 0 else np.nan
+
+
+def normalize_weights(weights):
+    weights = {k: max(0.0, float(v)) for k, v in weights.items()}
+    total = sum(weights.values())
+    if total <= 0:
+        return weights
+    return {k: v / total for k, v in weights.items()}
+
+
+def apply_equity_engine_minimum(w_step, asset_scores, benchmark_score, ranking):
+    if EQUITY_ENGINE_ASSET not in w_step or EQUITY_ENGINE_ASSET not in ranking:
+        return w_step, None
+    eq_score = asset_scores.get(EQUITY_ENGINE_ASSET, np.nan)
+    if pd.isna(eq_score) or pd.isna(benchmark_score) or eq_score <= benchmark_score:
+        return w_step, None
+
+    rank_pos = ranking.index(EQUITY_ENGINE_ASSET)
+    target = None
+    reason = None
+    if rank_pos == 0 and eq_score > benchmark_score + EQUITY_ENGINE_STRONG_EDGE:
+        target = EQUITY_ENGINE_MIN_STRONG_TOP1
+        reason = "equity_engine_top1_strong_vs_benchmark"
+    elif rank_pos == 0:
+        target = EQUITY_ENGINE_MIN_TOP1
+        reason = "equity_engine_top1_vs_benchmark"
+    elif rank_pos == 1:
+        target = EQUITY_ENGINE_MIN_TOP2
+        reason = "equity_engine_top2_vs_benchmark"
+
+    if target is None or w_step.get(EQUITY_ENGINE_ASSET, 0.0) >= target:
+        return w_step, None
+
+    current = w_step.get(EQUITY_ENGINE_ASSET, 0.0)
+    need = target - current
+    donors = {k: v for k, v in w_step.items() if k != EQUITY_ENGINE_ASSET and v > 0}
+    donor_sum = sum(donors.values())
+    if donor_sum <= 0:
+        return w_step, None
+
+    for k, v in donors.items():
+        w_step[k] = max(0.0, w_step[k] - need * (v / donor_sum))
+    w_step[EQUITY_ENGINE_ASSET] = target
+    return normalize_weights(w_step), reason
+
+
+def build_benchmark_asset_weights():
+    return {EQUITY_ENGINE_ASSET: BENCHMARK_WEIGHTS["equities"], "bonds": BENCHMARK_WEIGHTS["bonds"]}
+
+
 def build_v5_weights(prices, i, gics_buckets, include_bitcoin=True, equity_factor_max=DEFAULT_EQUITY_FACTOR_MAX):
     equity_engine_weights, equity_diag = compute_equity_engine_weights(
         prices=prices,
@@ -396,10 +473,6 @@ def build_v5_weights(prices, i, gics_buckets, include_bitcoin=True, equity_facto
     if not available_assets:
         raise ValueError("Keine verfügbaren Assets mit ausreichender Historie")
 
-    base = {a: NEUTRAL_WEIGHTS[a] for a in available_assets}
-    base_sum = sum(base.values())
-    w_step = {a: v / base_sum for a, v in base.items()}
-
     rankable_assets = [a for a in available_assets if a != RISK_FREE_ASSET]
     asset_scores = {}
     for asset in rankable_assets:
@@ -408,24 +481,56 @@ def build_v5_weights(prices, i, gics_buckets, include_bitcoin=True, equity_facto
         else:
             asset_scores[asset] = compute_score(prices, asset, i)
 
-    ranking = sorted(asset_scores, key=lambda a: asset_scores[a] if pd.notna(asset_scores[a]) else -999, reverse=True)
+    benchmark_score = compute_benchmark_score(prices, i)
+
+    raw_ranking = sorted(asset_scores, key=lambda a: asset_scores[a] if pd.notna(asset_scores[a]) else -999, reverse=True)
+    eligible_assets = [
+        a for a in raw_ranking
+        if pd.notna(asset_scores.get(a))
+        and pd.notna(benchmark_score)
+        and asset_scores[a] > benchmark_score
+    ]
+
+    if BENCHMARK_RELATIVE_FILTER:
+        ranking = eligible_assets
+    else:
+        ranking = raw_ranking
+
     top3 = ranking[:3]
 
-    boosts = {0: 0.10, 1: 0.05, 2: 0.02}
-    total_boost = 0.0
-    for rank, asset in enumerate(top3):
-        boost = boosts[rank]
-        if pd.notna(asset_scores[asset]) and asset_scores[asset] > 0:
-            w_step[asset] = w_step.get(asset, 0.0) + boost
-        elif RISK_FREE_ASSET in w_step:
-            w_step[RISK_FREE_ASSET] = w_step.get(RISK_FREE_ASSET, 0.0) + boost
-        total_boost += boost
+    if not top3:
+        w_step = build_benchmark_asset_weights() if BENCHMARK_FALLBACK_MODE == "benchmark" else {RISK_FREE_ASSET: 1.0}
+        fallback_used = True
+        fallback_reason = "no_asset_outperforms_70_30_score"
+    else:
+        base = {a: NEUTRAL_WEIGHTS[a] for a in available_assets}
+        base_sum = sum(base.values())
+        w_step = {a: v / base_sum for a, v in base.items()}
 
-    if EQUITY_ENGINE_ASSET in w_step:
-        w_step[EQUITY_ENGINE_ASSET] -= total_boost * 0.7
-    if "bonds" in w_step:
-        w_step["bonds"] -= total_boost * 0.3
-    w_step = {k: max(0.0, v) for k, v in w_step.items()}
+        boosts = {0: 0.10, 1: 0.05, 2: 0.02}
+        boosted_assets = set()
+        for rank, asset in enumerate(top3):
+            boost = boosts[rank]
+            w_step[asset] = w_step.get(asset, 0.0) + boost
+            boosted_assets.add(asset)
+
+        total_extra = sum(boosts[r] for r in range(len(top3)))
+        donors = {k: v for k, v in w_step.items() if k not in boosted_assets and v > 0}
+        donor_sum = sum(donors.values())
+        if donor_sum > 0 and total_extra > 0:
+            for k, v in donors.items():
+                w_step[k] = max(0.0, w_step[k] - total_extra * (v / donor_sum))
+        w_step = normalize_weights(w_step)
+
+        w_step, min_reason = apply_equity_engine_minimum(w_step, asset_scores, benchmark_score, raw_ranking)
+        fallback_used = False
+        fallback_reason = min_reason
+
+        portfolio_score = weighted_score(w_step, asset_scores)
+        if pd.notna(portfolio_score) and pd.notna(benchmark_score) and portfolio_score <= benchmark_score:
+            w_step = build_benchmark_asset_weights() if BENCHMARK_FALLBACK_MODE == "benchmark" else {RISK_FREE_ASSET: 1.0}
+            fallback_used = True
+            fallback_reason = "portfolio_score_not_above_70_30_score"
 
     current_weights = pd.Series(0.0, index=prices.columns)
     for asset, weight in w_step.items():
@@ -442,11 +547,18 @@ def build_v5_weights(prices, i, gics_buckets, include_bitcoin=True, equity_facto
     diagnostics = {
         "available_assets": available_assets,
         "asset_scores": {k: None if pd.isna(v) else float(v) for k, v in asset_scores.items()},
+        "benchmark_score": None if pd.isna(benchmark_score) else float(benchmark_score),
+        "raw_asset_ranking": raw_ranking,
+        "eligible_assets_vs_benchmark": eligible_assets,
         "asset_ranking": ranking,
         "selected_assets": top3,
         "equity_engine": equity_diag,
         "asset_level_weights": {k: float(v) for k, v in w_step.items()},
-        "weighting_method": "v5_equity_engine_first_then_asset_class_momentum",
+        "asset_level_portfolio_score": None if pd.isna(weighted_score(w_step, asset_scores)) else float(weighted_score(w_step, asset_scores)),
+        "benchmark_relative_filter": BENCHMARK_RELATIVE_FILTER,
+        "fallback_used": bool(fallback_used),
+        "fallback_reason": fallback_reason,
+        "weighting_method": "v5_1_benchmark_relative_asset_filter_and_portfolio_score_gate",
     }
     return current_weights, diagnostics
 
@@ -540,7 +652,7 @@ def backtest_v5():
         proxies.update({bucket: ticker for bucket, ticker in gics_buckets.items()})
 
         return jsonify({
-            "summary": [get_stats(nav.loc[idx], "Portfolio V5"), get_stats(bench.loc[idx], "Benchmark 70/30")],
+            "summary": [get_stats(nav.loc[idx], "Portfolio V5.1"), get_stats(bench.loc[idx], "Benchmark 70/30")],
             "chart": {"dates": [d.strftime("%Y-%m-%d") for d in idx], "portfolio": nav.loc[idx].tolist(), "benchmark": bench.loc[idx].tolist()},
             "latest_weights": history[-1] if history else None,
             "history": history,
@@ -559,8 +671,14 @@ def backtest_v5():
                 "missing_asset_method": "method_a_available_assets_sum_to_100",
                 "minimum_core_assets": MIN_CORE_ASSETS,
                 "lookback_months": LOOKBACK_MONTHS,
-                "ranking_method": "v5: first build optimized equity_engine, then rank equity_engine vs bonds/gold/managed_futures/bitcoin",
-                "weighting_method": "v5_equity_engine_first_then_asset_class_momentum",
+                "ranking_method": "v5.1: first build optimized equity_engine; rank only assets whose score beats 70/30 score; final asset portfolio must also beat 70/30 score",
+                "weighting_method": "v5_1_benchmark_relative_asset_filter_and_portfolio_score_gate",
+                "benchmark_relative_filter": BENCHMARK_RELATIVE_FILTER,
+                "benchmark_fallback_mode": BENCHMARK_FALLBACK_MODE,
+                "equity_engine_min_top1": EQUITY_ENGINE_MIN_TOP1,
+                "equity_engine_min_strong_top1": EQUITY_ENGINE_MIN_STRONG_TOP1,
+                "equity_engine_strong_edge": EQUITY_ENGINE_STRONG_EDGE,
+                "equity_engine_min_top2": EQUITY_ENGINE_MIN_TOP2,
                 "managed_futures_source": "local_sg_trend_file" if SG_TREND_FILE.exists() else "yfinance_dbmf",
                 "available_from": availability,
                 "proxies": proxies,

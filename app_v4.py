@@ -244,9 +244,7 @@ def compute_dynamic_sector_alpha(top_buckets, bucket_scores, equity_benchmark_sc
 
     if avg_relative_edge <= 0:
         scale = 0.0
-    elif avg_relative_edge < 0.03:
-        scale = 0.33
-    elif avg_relative_edge < 0.08:
+    elif avg_relative_edge < 0.02:
         scale = 0.66
     else:
         scale = 1.0
@@ -361,7 +359,7 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         "sector_alpha_scale": float(sector_alpha_scale),
         "avg_sector_relative_edge": float(avg_sector_relative_edge),
         "max_sector_relative_edge": float(max_sector_relative_edge),
-        "weighting_method": "v4_2_dynamic_sector_alpha_by_relative_strength"
+        "weighting_method": "v4_3_ambitious_dynamic_sector_alpha"
     }
     return current_weights, diagnostics
 
@@ -455,7 +453,7 @@ def backtest_v4():
         proxies.update({bucket: ticker for bucket, ticker in gics_buckets.items()})
 
         return jsonify({
-            "summary": [get_stats(nav.loc[idx], "Portfolio V4.2"), get_stats(bench.loc[idx], "Benchmark 70/30")],
+            "summary": [get_stats(nav.loc[idx], "Portfolio V4.3"), get_stats(bench.loc[idx], "Benchmark 70/30")],
             "chart": {"dates": [d.strftime("%Y-%m-%d") for d in idx], "portfolio": nav.loc[idx].tolist(), "benchmark": bench.loc[idx].tolist()},
             "latest_weights": history[-1] if history else None,
             "history": history,
@@ -473,8 +471,8 @@ def backtest_v4():
                 "minimum_core_assets": MIN_CORE_ASSETS,
                 "lookback_months": LOOKBACK_MONTHS,
                 "ranking_method": "weighted_3m_6m_12m_momentum_with_sector_relative_strength_filter",
-                "weighting_method": "v4_2_dynamic_sector_alpha_by_relative_strength",
-                "sector_alpha_scaling": "avg_top3_relative_edge_vs_equities: <=0 => 0%, <3pp => 33%, <8pp => 66%, >=8pp => 100% of sector_alpha_max",
+                "weighting_method": "v4_3_ambitious_dynamic_sector_alpha",
+                "sector_alpha_scaling": "ambitious: avg_top3_relative_edge_vs_equities <=0 => 0%, <2pp => 66%, >=2pp => 100% of sector_alpha_max",
                 "selected_asset_count": 3,
                 "selected_sector_count": 3,
                 "managed_futures_source": "local_sg_trend_file" if SG_TREND_FILE.exists() else "yfinance_dbmf",

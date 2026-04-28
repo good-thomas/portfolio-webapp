@@ -226,6 +226,35 @@ def compute_score(prices, asset, i):
     return 0.5 * (p_now / p3 - 1) + 0.3 * (p_now / p6 - 1) + 0.2 * (p_now / p12 - 1)
 
 
+def compute_dynamic_sector_alpha(top_buckets, bucket_scores, equity_benchmark_score, sector_alpha_max, available_equity_weight):
+    if not top_buckets or pd.isna(equity_benchmark_score):
+        return 0.0, 0.0, 0.0, 0.0
+
+    relative_edges = [
+        bucket_scores[b] - equity_benchmark_score
+        for b in top_buckets
+        if pd.notna(bucket_scores.get(b))
+    ]
+
+    if not relative_edges:
+        return 0.0, 0.0, 0.0, 0.0
+
+    avg_relative_edge = float(np.mean(relative_edges))
+    max_relative_edge = float(np.max(relative_edges))
+
+    if avg_relative_edge <= 0:
+        scale = 0.0
+    elif avg_relative_edge < 0.03:
+        scale = 0.33
+    elif avg_relative_edge < 0.08:
+        scale = 0.66
+    else:
+        scale = 1.0
+
+    equity_alpha = min(sector_alpha_max * scale, max(0.0, available_equity_weight))
+    return float(equity_alpha), float(scale), avg_relative_edge, max_relative_edge
+
+
 def clamp_sector_alpha_max(value):
     if value is None:
         return DEFAULT_SECTOR_ALPHA_MAX
@@ -295,8 +324,15 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         reverse=True
     )[:3]
 
+    equity_alpha, sector_alpha_scale, avg_sector_relative_edge, max_sector_relative_edge = compute_dynamic_sector_alpha(
+        top_buckets=top_buckets,
+        bucket_scores=bucket_scores,
+        equity_benchmark_score=equity_benchmark_score,
+        sector_alpha_max=sector_alpha_max,
+        available_equity_weight=w_step.get("equities", 0.0)
+    )
+
     current_weights = pd.Series(0.0, index=prices.columns)
-    equity_alpha = min(sector_alpha_max, max(0.0, w_step.get("equities", 0.0))) if top_buckets else 0.0
 
     for asset, weight in w_step.items():
         if asset == "equities":
@@ -322,7 +358,10 @@ def build_v4_weights(prices, i, gics_buckets, include_bitcoin=True, sector_alpha
         "selected_buckets": top_buckets,
         "sector_alpha_max": float(sector_alpha_max),
         "sector_alpha_used": float(equity_alpha),
-        "weighting_method": "v4_1_sector_relative_strength_vs_equities"
+        "sector_alpha_scale": float(sector_alpha_scale),
+        "avg_sector_relative_edge": float(avg_sector_relative_edge),
+        "max_sector_relative_edge": float(max_sector_relative_edge),
+        "weighting_method": "v4_2_dynamic_sector_alpha_by_relative_strength"
     }
     return current_weights, diagnostics
 
@@ -416,7 +455,7 @@ def backtest_v4():
         proxies.update({bucket: ticker for bucket, ticker in gics_buckets.items()})
 
         return jsonify({
-            "summary": [get_stats(nav.loc[idx], "Portfolio V4.1"), get_stats(bench.loc[idx], "Benchmark 70/30")],
+            "summary": [get_stats(nav.loc[idx], "Portfolio V4.2"), get_stats(bench.loc[idx], "Benchmark 70/30")],
             "chart": {"dates": [d.strftime("%Y-%m-%d") for d in idx], "portfolio": nav.loc[idx].tolist(), "benchmark": bench.loc[idx].tolist()},
             "latest_weights": history[-1] if history else None,
             "history": history,
@@ -434,7 +473,8 @@ def backtest_v4():
                 "minimum_core_assets": MIN_CORE_ASSETS,
                 "lookback_months": LOOKBACK_MONTHS,
                 "ranking_method": "weighted_3m_6m_12m_momentum_with_sector_relative_strength_filter",
-                "weighting_method": "v4_1_relative_neutral_weights_plus_top3_asset_boosts_plus_relative_strength_sector_alpha",
+                "weighting_method": "v4_2_dynamic_sector_alpha_by_relative_strength",
+                "sector_alpha_scaling": "avg_top3_relative_edge_vs_equities: <=0 => 0%, <3pp => 33%, <8pp => 66%, >=8pp => 100% of sector_alpha_max",
                 "selected_asset_count": 3,
                 "selected_sector_count": 3,
                 "managed_futures_source": "local_sg_trend_file" if SG_TREND_FILE.exists() else "yfinance_dbmf",

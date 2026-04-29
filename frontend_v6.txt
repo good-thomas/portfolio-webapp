@@ -1,0 +1,1 @@
+<div>V6 FRONTEND PLACEHOLDER - use updated version from chat</div>

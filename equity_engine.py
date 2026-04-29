@@ -79,16 +79,24 @@ def api():
         counts = pd.Series([s for h in weight_hist for s in h["selected"]]).value_counts().to_dict()
         matrix = df.groupby([df.index.year, df.index.month])["ret"].sum().unstack().replace([np.inf, -np.inf], 0).fillna(0)
 
+        # Matrix-Bereinigung (NaN zu None für JSON-Kompatibilität)
+        matrix_dict = matrix.where(pd.notnull(matrix), None).to_dict(orient="index")
+
         return jsonify({
             "series": {
                 "dates": [d.strftime("%Y-%m-%d") for d in dates],
                 "equity_engine": (1 + pd.Series(engine_rets)).cumprod().tolist(),
                 "acwi": (1 + pd.Series(acwi_rets)).cumprod().tolist()
             },
-            "matrix": matrix.to_dict(orient="index"),
+            "matrix": matrix_dict,
             "selection_counts": counts,
-            "performance": {"equity_engine": {"cagr": 0.1}, "acwi": {"cagr": 0.08}}, # Vereinfacht für Stabilität
-            "latest_weights": weight_hist[-1] if weight_hist else {}
+            "performance": {
+                "equity_engine": calc_stats(pd.Series(engine_rets, index=dates)),
+                "acwi": calc_stats(pd.Series(acwi_rets, index=dates))
+            },
+            "latest_weights": weight_hist[-1] if weight_hist else {},
+            "weight_history": weight_hist  # <--- DIESE ZEILE HAT GEFEHLT
+        })
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

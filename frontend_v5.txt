@@ -1,0 +1,718 @@
+<div id="pbt-app" style="font-family:Arial,sans-serif;max-width:1100px;margin:40px auto;color:#222;line-height:1.4">
+
+  <style>
+    #pbt-app .box {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+      background: #fafafa;
+    }
+
+    #pbt-app .row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: end;
+    }
+
+    #pbt-app .field {
+      display: flex;
+      flex-direction: column;
+      min-width: 220px;
+      margin-bottom: 12px;
+    }
+
+    #pbt-app label {
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+
+    #pbt-app input[type="text"],
+    #pbt-app select {
+      padding: 10px;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      font-size: 14px;
+      background: #fff;
+    }
+
+    #pbt-app .checkbox-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      min-height: 42px;
+    }
+
+    #pbt-app button {
+      padding: 12px 18px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      background: #111;
+      color: white;
+      font-size: 14px;
+    }
+
+    #pbt-app button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    #pbt-app table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      background: white;
+    }
+
+    #pbt-app th,
+    #pbt-app td {
+      border: 1px solid #ddd;
+      padding: 10px;
+      text-align: left;
+      font-size: 14px;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    #pbt-app th {
+      background: #f2f2f2;
+    }
+
+    #pbt-app .muted {
+      color: #666;
+      font-size: 13px;
+    }
+
+    #pbt-app .error {
+      color: #b00020;
+      font-weight: bold;
+    }
+
+    #pbt-app .success {
+      color: #0a7a32;
+      font-weight: bold;
+    }
+
+    #pbt-app .chart-wrap {
+      position: relative;
+      width: 100%;
+      height: 420px;
+    }
+
+    #pbt-app canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+
+    #pbt-app .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin: 12px 0;
+    }
+
+    #pbt-app .metric {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 10px;
+    }
+
+    #pbt-app .metric strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+  </style>
+
+  <div class="box">
+    <h2 style="margin-top:0">Portfolio Backtest V5</h2>
+    <p class="muted">
+      Equity Engine First: Zuerst wird ein optimierter Aktienbaustein aus ACWI und outperformenden Faktoren/Sektoren gebaut.
+      Danach wird dieser Aktienbaustein im Multi-Asset-Vergleich gegen Bonds, Gold, Managed Futures, Bitcoin und Cash gerankt.
+    </p>
+
+    <div class="row">
+      <div class="field">
+        <label for="pbt-cost">Rebalancing-Kosten</label>
+        <input id="pbt-cost" type="text" value="0.001">
+      </div>
+
+      <div class="field">
+        <label for="pbt-start-date">Startdatum</label>
+        <input id="pbt-start-date" type="text" placeholder="YYYY-MM-DD">
+      </div>
+
+      <div class="field">
+        <label for="pbt-equity-factor-max">Max. Equity-Faktoren</label>
+        <input id="pbt-equity-factor-max" type="text" value="0.50">
+        <span class="muted">0.50 = bis zu 50 %, 0.80 = bis zu 80 %</span>
+      </div>
+
+      <div class="field">
+        <label for="pbt-sector-proxy-set">Sektor-Proxies</label>
+        <select id="pbt-sector-proxy-set">
+          <option value="us_long_history" selected>US Long History</option>
+          <option value="ucits">UCITS / Europa</option>
+        </select>
+        <span class="muted">US Long History = längere Backtest-Historie</span>
+      </div>
+
+      <div class="checkbox-wrap">
+        <input id="pbt-btc" type="checkbox" checked>
+        <label for="pbt-btc" style="margin:0">Bitcoin verwenden</label>
+      </div>
+    </div>
+
+    <p class="muted">
+      In V5 werden Sektoren/Faktoren zuerst innerhalb der Equity Engine ausgewählt. Nur Faktoren mit positivem Score
+      und Outperformance gegenüber ACWI kommen in die Equity Engine. Danach konkurriert die fertige Equity Engine
+      mit den übrigen Assetklassen.
+    </p>
+
+    <button id="pbt-run" type="button">Backtest starten</button>
+    <p id="pbt-status" class="muted"></p>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Chart</h3>
+    <div class="chart-wrap">
+      <canvas id="pbt-chart"></canvas>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Performance</h3>
+    <div id="pbt-summary"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Monats- und Jahresperformance</h3>
+    <div id="pbt-yearly-performance"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Letzte Verteilung</h3>
+    <div id="pbt-weights"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Monatliche Allokation</h3>
+    <div id="pbt-history"></div>
+  </div>
+
+  <div class="box">
+    <h3 style="margin-top:0">Vergleich / Meta</h3>
+    <div id="pbt-meta"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    (function () {
+      var API_URL = "https://portfolio-webapp-kkxd.onrender.com/api/backtest_v5";
+
+      var btn = document.getElementById("pbt-run");
+      var statusEl = document.getElementById("pbt-status");
+      var summaryEl = document.getElementById("pbt-summary");
+      var yearlyPerformanceEl = document.getElementById("pbt-yearly-performance");
+      var weightsEl = document.getElementById("pbt-weights");
+      var historyEl = document.getElementById("pbt-history");
+      var metaEl = document.getElementById("pbt-meta");
+      var chartCanvas = document.getElementById("pbt-chart");
+
+      var chartInstance = null;
+
+      function fmtPct(value) {
+        if (value === null || typeof value === "undefined" || !isFinite(Number(value))) {
+          return "-";
+        }
+        return ((Number(value || 0)) * 100).toFixed(2) + " %";
+      }
+
+      function fmtNum(value) {
+        if (value === null || typeof value === "undefined" || !isFinite(Number(value))) {
+          return "-";
+        }
+        return Number(value).toFixed(4);
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, "&")
+          .replace(/</g, "<")
+          .replace(/>/g, ">")
+          .replace(/"/g, """)
+          .replace(/'/g, "&#039;");
+      }
+
+      function getDiag(row) {
+        return row && row.v5 ? row.v5 : {};
+      }
+
+      function getEquityDiag(row) {
+        var diag = getDiag(row);
+        return diag && diag.equity_engine ? diag.equity_engine : {};
+      }
+
+      function renderSummary(summary) {
+        if (!summary || !summary.length) {
+          summaryEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var html = '<table><thead><tr><th>Strategie</th><th>CAGR</th><th>Vola</th><th>Max DD</th><th>Sharpe</th></tr></thead><tbody>';
+
+        summary.forEach(function (row) {
+          html += '<tr>' +
+            '<td>' + escapeHtml(row.strategy || '') + '</td>' +
+            '<td>' + escapeHtml(row.cagr || '') + '</td>' +
+            '<td>' + escapeHtml(row.vola || '') + '</td>' +
+            '<td>' + escapeHtml(row.max_dd || '') + '</td>' +
+            '<td>' + escapeHtml(row.sharpe || '') + '</td>' +
+            '</tr>';
+        });
+
+        html += '</tbody></table>';
+        summaryEl.innerHTML = html;
+      }
+
+      function renderYearlyPerformance(history) {
+        if (!history || !history.length) {
+          yearlyPerformanceEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var monthNames = ["Jan", "Feb", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+        var byYear = {};
+
+        history.forEach(function(row) {
+          if (!row.date) return;
+
+          var d = new Date(row.date + "T00:00:00");
+          if (isNaN(d.getTime())) return;
+
+          var year = d.getFullYear();
+          var month = d.getMonth();
+
+          if (!byYear[year]) {
+            byYear[year] = {
+              months: Array(12).fill(null),
+              yearlyReturn: 1.0
+            };
+          }
+
+          var r = Number(row.net_return || 0);
+          byYear[year].months[month] = r;
+          byYear[year].yearlyReturn *= (1 + r);
+        });
+
+        var years = Object.keys(byYear).sort();
+
+        var html = '<div style="overflow-x:auto;">';
+        html += '<table><thead><tr>';
+        html += '<th>Jahr</th>';
+
+        monthNames.forEach(function(m) {
+          html += '<th>' + escapeHtml(m) + '</th>';
+        });
+
+        html += '<th>Gesamtjahr</th>';
+        html += '</tr></thead><tbody>';
+
+        years.forEach(function(year) {
+          var row = byYear[year];
+
+          html += '<tr>';
+          html += '<td><strong>' + escapeHtml(year) + '</strong></td>';
+
+          row.months.forEach(function(r) {
+            html += '<td>' + (r === null ? '-' : fmtPct(r)) + '</td>';
+          });
+
+          html += '<td><strong>' + fmtPct(row.yearlyReturn - 1) + '</strong></td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+        html += '<p class="muted">Gesamtjahr = geometrisch verkettete Monatsrenditen nach Rebalancing-Kosten.</p>';
+
+        yearlyPerformanceEl.innerHTML = html;
+      }
+
+      function renderWeights(latest) {
+        if (!latest || !latest.weights) {
+          weightsEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var diag = getDiag(latest);
+        var eq = getEquityDiag(latest);
+
+        var selectedAssets = diag.selected_assets || [];
+        var selectedBuckets = eq.selected_buckets || [];
+        var relativeStrengthBuckets = eq.relative_strength_buckets || [];
+        var internalWeights = eq.internal_weights || {};
+        var assetLevelWeights = diag.asset_level_weights || {};
+
+        var html = '';
+        html += '<p><strong>Datum:</strong> ' + escapeHtml(latest.date || '-') + '</p>';
+
+        html += '<div class="metric-grid">';
+        html += '<div class="metric"><strong>Equity Engine Score</strong>' + fmtPct(diag.asset_scores ? diag.asset_scores.equity_engine : null) + '</div>';
+        html += '<div class="metric"><strong>ACWI Score</strong>' + fmtPct(eq.equity_score) + '</div>';
+        html += '<div class="metric"><strong>Max. Equity-Faktoren</strong>' + fmtPct(eq.factor_max) + '</div>';
+        html += '<div class="metric"><strong>Genutzte Faktorquote</strong>' + fmtPct(eq.factor_weight) + '</div>';
+        html += '<div class="metric"><strong>Basisgewicht ACWI in Equity Engine</strong>' + fmtPct(eq.base_weight) + '</div>';
+        html += '<div class="metric"><strong>Ø relative Stärke Top-Faktoren vs. ACWI</strong>' + fmtPct(eq.avg_relative_edge) + '</div>';
+        html += '<div class="metric"><strong>Max. relative Stärke vs. ACWI</strong>' + fmtPct(eq.max_relative_edge) + '</div>';
+        html += '<div class="metric"><strong>Turnover</strong>' + fmtPct(latest.turnover || 0) + '</div>';
+        html += '</div>';
+
+        html += '<p><strong>Top-3-Assetklassen:</strong> ' + (selectedAssets.length ? escapeHtml(selectedAssets.join(', ')) : '-') + '</p>';
+        html += '<p><strong>Ausgewählte Equity-Faktoren/Sektoren:</strong> ' + (selectedBuckets.length ? escapeHtml(selectedBuckets.join(', ')) : '-') + '</p>';
+        html += '<p><strong>Faktoren/Sektoren mit relativer Stärke:</strong> ' + (relativeStrengthBuckets.length ? escapeHtml(relativeStrengthBuckets.join(', ')) : '-') + '</p>';
+
+        html += '<h4>Asset-Level vor Auflösung der Equity Engine</h4>';
+        html += '<table><thead><tr><th>Assetklasse</th><th>Gewicht</th></tr></thead><tbody>';
+
+        Object.keys(assetLevelWeights)
+          .sort(function(a, b) { return assetLevelWeights[b] - assetLevelWeights[a]; })
+          .forEach(function (key) {
+            html += '<tr><td>' + escapeHtml(key) + '</td><td>' + fmtPct(assetLevelWeights[key]) + '</td></tr>';
+          });
+
+        html += '</tbody></table>';
+
+        html += '<h4>Interne Equity Engine</h4>';
+        html += '<table><thead><tr><th>Baustein</th><th>Gewicht innerhalb Equity Engine</th></tr></thead><tbody>';
+
+        Object.keys(internalWeights)
+          .sort(function(a, b) { return internalWeights[b] - internalWeights[a]; })
+          .forEach(function (key) {
+            html += '<tr><td>' + escapeHtml(key) + '</td><td>' + fmtPct(internalWeights[key]) + '</td></tr>';
+          });
+
+        html += '</tbody></table>';
+
+        html += '<h4>Finale handelbare Verteilung</h4>';
+        html += '<table><thead><tr><th>Asset / Sektor</th><th>Gewicht</th></tr></thead><tbody>';
+
+        Object.keys(latest.weights)
+          .sort(function(a, b) { return latest.weights[b] - latest.weights[a]; })
+          .forEach(function (key) {
+            var val = latest.weights[key];
+            html += '<tr><td>' + escapeHtml(key) + '</td><td>' + fmtPct(val) + '</td></tr>';
+          });
+
+        html += '</tbody></table>';
+
+        weightsEl.innerHTML = html;
+      }
+
+      function renderHistory(history) {
+        if (!history || !history.length) {
+          historyEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var html = '<div style="overflow-x:auto;">';
+        html += '<table><thead><tr>' +
+          '<th>Monat</th>' +
+          '<th>Assetklasse 1</th>' +
+          '<th>Assetklasse 2</th>' +
+          '<th>Assetklasse 3</th>' +
+          '<th>Equity Engine Gewicht</th>' +
+          '<th>Faktorquote intern</th>' +
+          '<th>Faktor 1</th>' +
+          '<th>Faktor 2</th>' +
+          '<th>Faktor 3</th>' +
+          '<th>Ø Edge</th>' +
+          '<th>Cash</th>' +
+          '<th>Rendite</th>' +
+          '</tr></thead><tbody>';
+
+        history.forEach(function (row) {
+          var diag = getDiag(row);
+          var eq = getEquityDiag(row);
+
+          var selectedAssets = diag.selected_assets ? diag.selected_assets.slice(0, 3) : [];
+          var selectedBuckets = eq.selected_buckets ? eq.selected_buckets.slice(0, 3) : [];
+          var w = row.weights || {};
+          var assetLevelWeights = diag.asset_level_weights || {};
+          var internalWeights = eq.internal_weights || {};
+
+          function fmtAsset(assetName) {
+            if (!assetName) return '-';
+            var weight;
+            if (assetName === "equity_engine") {
+              weight = fmtPct(assetLevelWeights.equity_engine || 0);
+            } else {
+              weight = fmtPct(w[assetName] || assetLevelWeights[assetName] || 0);
+            }
+            return escapeHtml(assetName) + ' (' + weight + ')';
+          }
+
+          function fmtFactor(factorName) {
+            if (!factorName) return '-';
+            var internal = internalWeights[factorName] || 0;
+            var finalW = w[factorName] || 0;
+            return escapeHtml(factorName) + ' (' + fmtPct(finalW) + ' final / ' + fmtPct(internal) + ' intern)';
+          }
+
+          html += '<tr>' +
+            '<td>' + escapeHtml(row.date || '-') + '</td>' +
+            '<td>' + fmtAsset(selectedAssets[0]) + '</td>' +
+            '<td>' + fmtAsset(selectedAssets[1]) + '</td>' +
+            '<td>' + fmtAsset(selectedAssets[2]) + '</td>' +
+            '<td>' + fmtPct(assetLevelWeights.equity_engine || 0) + '</td>' +
+            '<td>' + fmtPct(eq.factor_weight || 0) + '</td>' +
+            '<td>' + fmtFactor(selectedBuckets[0]) + '</td>' +
+            '<td>' + fmtFactor(selectedBuckets[1]) + '</td>' +
+            '<td>' + fmtFactor(selectedBuckets[2]) + '</td>' +
+            '<td>' + fmtPct(eq.avg_relative_edge || 0) + '</td>' +
+            '<td>' + fmtPct(w.cash || 0) + '</td>' +
+            '<td>' + fmtPct(row.net_return || 0) + '</td>' +
+            '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+        historyEl.innerHTML = html;
+      }
+
+      function renderMeta(meta) {
+        if (!meta) {
+          metaEl.innerHTML = "<p>Keine Daten</p>";
+          return;
+        }
+
+        var html = '<table><tbody>';
+        html += '<tr><th>Bitcoin</th><td>' + (meta.include_bitcoin ? 'an' : 'aus') + '</td></tr>';
+        html += '<tr><th>Sektor-Proxy-Set</th><td>' + escapeHtml(meta.sector_proxy_set || '-') + '</td></tr>';
+
+        if (meta.allowed_sector_proxy_sets) {
+          html += '<tr><th>Erlaubte Sektor-Proxy-Sets</th><td>' + escapeHtml(meta.allowed_sector_proxy_sets.join(', ')) + '</td></tr>';
+        }
+
+        html += '<tr><th>Managed Futures Quelle</th><td>' + escapeHtml(meta.managed_futures_source || '-') + '</td></tr>';
+        html += '<tr><th>Startdatum gewünscht</th><td>' + escapeHtml(meta.start_date || 'automatisch') + '</td></tr>';
+        html += '<tr><th>Tatsächliches Startdatum</th><td>' + escapeHtml(meta.actual_start_date || '-') + '</td></tr>';
+        html += '<tr><th>Rebalancing-Kosten</th><td>' + fmtPct(meta.transaction_cost_rate || 0) + '</td></tr>';
+
+        if (typeof meta.equity_factor_max !== "undefined") {
+          html += '<tr><th>Max. Equity-Faktoren</th><td>' + fmtPct(meta.equity_factor_max) + '</td></tr>';
+        }
+
+        if (typeof meta.equity_factor_max_allowed !== "undefined") {
+          html += '<tr><th>Erlaubtes Maximum Equity-Faktoren</th><td>' + fmtPct(meta.equity_factor_max_allowed) + '</td></tr>';
+        }
+
+        if (typeof meta.equity_engine_top_n !== "undefined") {
+          html += '<tr><th>Anzahl Equity-Faktoren</th><td>' + escapeHtml(meta.equity_engine_top_n) + '</td></tr>';
+        }
+
+        if (meta.equity_engine_weighting) {
+          html += '<tr><th>Equity-Engine-Gewichtung</th><td>' + escapeHtml(meta.equity_engine_weighting) + '</td></tr>';
+        }
+
+        html += '<tr><th>Benchmark</th><td>70 % ACWI / 30 % IEF</td></tr>';
+        html += '<tr><th>Ranking-Methode</th><td>' + escapeHtml(meta.ranking_method || '-') + '</td></tr>';
+        html += '<tr><th>Gewichtungsmethode</th><td>' + escapeHtml(meta.weighting_method || '-') + '</td></tr>';
+
+        if (meta.available_from) {
+          html += '<tr><th>Verfügbarkeit im Modell</th><td>';
+          html += '<div style="overflow-x:auto;">';
+          html += '<table><thead><tr>' +
+            '<th>Asset / Sektor</th>' +
+            '<th>Proxy</th>' +
+            '<th>Nutzbar ab</th>' +
+            '</tr></thead><tbody>';
+
+          Object.keys(meta.available_from)
+            .sort(function(a, b) {
+              var da = meta.available_from[a] || '9999-99-99';
+              var db = meta.available_from[b] || '9999-99-99';
+              return da.localeCompare(db);
+            })
+            .forEach(function(key) {
+              var proxy = meta.proxies && meta.proxies[key] ? meta.proxies[key] : '-';
+              var date = meta.available_from[key] || 'nicht verfügbar';
+
+              html += '<tr>' +
+                '<td>' + escapeHtml(key) + '</td>' +
+                '<td>' + escapeHtml(proxy) + '</td>' +
+                '<td>' + escapeHtml(date) + '</td>' +
+                '</tr>';
+            });
+
+          html += '</tbody></table>';
+          html += '</div>';
+          html += '<p class="muted">Nutzbar ab bedeutet: Der Proxy hat im Modell bereits die erforderlichen 12 Monate Historie.</p>';
+          html += '</td></tr>';
+        }
+
+        if (meta.proxies) {
+          html += '<tr><th>Proxies</th><td><pre>' + escapeHtml(JSON.stringify(meta.proxies, null, 2)) + '</pre></td></tr>';
+        }
+
+        html += '</tbody></table>';
+        metaEl.innerHTML = html;
+      }
+
+      function renderChart(chart) {
+        if (!chart || !chart.dates || !chart.portfolio || !chart.benchmark) {
+          statusEl.className = "error";
+          statusEl.textContent = "Fehler: Chartdaten fehlen";
+          return;
+        }
+
+        if (chartInstance) {
+          chartInstance.destroy();
+        }
+
+        var ctx = chartCanvas.getContext("2d");
+
+        chartInstance = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels: chart.dates,
+            datasets: [
+              {
+                label: "Portfolio V5",
+                data: chart.portfolio,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.15
+              },
+              {
+                label: "Benchmark 70/30",
+                data: chart.benchmark,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.15
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: {
+              mode: "index",
+              intersect: false
+            },
+            plugins: {
+              legend: {
+                display: true
+              },
+              tooltip: {
+                callbacks: {
+                  label: function(context) {
+                    var val = context.parsed.y;
+                    return context.dataset.label + ": " + (typeof val === "number" ? val.toFixed(3) : val);
+                  }
+                }
+              }
+            },
+            scales: {
+              x: {
+                ticks: {
+                  maxTicksLimit: 12,
+                  autoSkip: true
+                }
+              },
+              y: {
+                beginAtZero: false
+              }
+            }
+          }
+        });
+      }
+
+      btn.addEventListener("click", function () {
+        var cost = parseFloat(String(document.getElementById("pbt-cost").value).replace(",", "."));
+        var startDate = String(document.getElementById("pbt-start-date").value || "").trim();
+        var includeBTC = document.getElementById("pbt-btc").checked;
+        var equityFactorMax = parseFloat(String(document.getElementById("pbt-equity-factor-max").value).replace(",", "."));
+        var sectorProxySet = document.getElementById("pbt-sector-proxy-set").value;
+
+        if (!isFinite(cost)) {
+          statusEl.className = "error";
+          statusEl.textContent = "Ungültiger Kostenwert";
+          return;
+        }
+
+        if (!isFinite(equityFactorMax)) {
+          statusEl.className = "error";
+          statusEl.textContent = "Ungültiger Wert für Max. Equity-Faktoren";
+          return;
+        }
+
+        if (equityFactorMax < 0 || equityFactorMax > 0.8) {
+          statusEl.className = "error";
+          statusEl.textContent = "Max. Equity-Faktoren muss zwischen 0.0 und 0.8 liegen";
+          return;
+        }
+
+        if (sectorProxySet !== "us_long_history" && sectorProxySet !== "ucits") {
+          statusEl.className = "error";
+          statusEl.textContent = "Ungültiges Sektor-Proxy-Set";
+          return;
+        }
+
+        btn.disabled = true;
+        statusEl.className = "muted";
+        statusEl.textContent = "Lädt ...";
+
+        fetch(API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          body: JSON.stringify({
+            transaction_cost_rate: cost,
+            include_bitcoin: includeBTC,
+            start_date: startDate || null,
+            equity_factor_max: equityFactorMax,
+            sector_proxy_set: sectorProxySet
+          })
+        })
+        .then(function (res) {
+          return res.json().then(function (data) {
+            return { ok: res.ok, data: data };
+          });
+        })
+        .then(function (result) {
+          if (!result.ok) {
+            throw new Error(result.data && result.data.error ? result.data.error : "API-Fehler");
+          }
+
+          statusEl.className = "success";
+          statusEl.textContent = "Backtest erfolgreich geladen";
+
+          renderChart(result.data.chart);
+          renderSummary(result.data.summary);
+          renderYearlyPerformance(result.data.history);
+          renderWeights(result.data.latest_weights);
+          renderHistory(result.data.history);
+          renderMeta(result.data.meta);
+        })
+        .catch(function (err) {
+          statusEl.className = "error";
+          statusEl.textContent = "Fehler: " + err.message;
+        })
+        .finally(function () {
+          btn.disabled = false;
+        });
+      });
+    })();
+  </script>
+</div>

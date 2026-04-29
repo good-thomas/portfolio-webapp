@@ -97,7 +97,6 @@ def api():
             "latest_weights": weight_hist[-1] if weight_hist else {},
             "weight_history": weight_hist  # <--- DIESE ZEILE HAT GEFEHLT
         })
-        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

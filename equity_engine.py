@@ -101,8 +101,8 @@ def run_backtest(start_date=None, sector_proxy_set=DEFAULT_SECTOR_PROXY_SET, cos
             "acwi": calc_stats(pd.Series(acwi_rets, index=dates))
         },
         "matrix": matrix.to_dict(orient="index"),
-        "selection_counts": pd.Series([b for h in weight_hist for b in h["selected"]]).value_index().to_dict() if weight_hist else {},
-        "latest_weights": weight_hist[-1] if weight_hist else {}
+# Korrigierte Zeile:
+"selection_counts": pd.Series([b for h in weight_hist for b in h["selected"]]).value_counts().to_dict() if weight_hist else {},        "latest_weights": weight_hist[-1] if weight_hist else {}
     }
 
 def calc_stats(r):

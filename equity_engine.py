@@ -2,11 +2,11 @@ import math
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
+from flask import Flask, request, jsonify
+from flask_cors import CORS # <--- Das muss importiert sein
 
 app = Flask(__name__)
-CORS(app)
+CORS(app) # <--- Das erlaubt JEDER Website die Abfrage
 
 # --- Konfiguration ---
 START_DATE = "2000-01-01"

@@ -1,1 +1,1 @@
-<div>V6 FRONTEND PLACEHOLDER - use updated version from chat</div>
+<div id="pbt-app">V6 READY</div>

@@ -40,16 +40,21 @@ def compute_score(series, i, w1, w3, w6):
 # --- Konfiguration ---
 
 TICKERS = {
-    "us_long_history": {
+    "us_agnostic_v3": {
         "equities": "ACWI",
-        "energy": "XLE", "materials": "XLB", "industrials": "XLI", "cons_disc": "XLY",
-        "cons_staples": "XLP", "health_care": "XLV", "financials": "XLF", "technology": "XLK",
-        "utilities": "XLU", "real_estate": "IYR", "semis": "SMH", "software": "IGV"
-    },
-    "ucits": {
-        "equities": "ACWI",
-        "energy": "WNRG.DE", "materials": "XMWS.DE", "technology": "IGPT.DE", "banks": "EXV1.DE",
-        "health": "WHEA.DE", "utilities": "WUTI.DE", "real_estate": "DPRE.DE"
+        # IT & Communication
+        "software": "IGV", "semis": "SMH", "tech": "XLK", "media": "XLC",
+        # Industrials
+        "defense": "ITA", "transport": "IYT", "industrials": "XLI",
+        # Health Care
+        "biotech": "XBI", "healthcare": "XLV",
+        # Financials
+        "banks": "KBE", "insurance": "KIE",
+        # Consumer
+        "retail": "XRT", "staples": "XLP",
+        # Resources & Infrastructure
+        "metals": "XME", "materials": "XLB", "energy": "XLE", 
+        "utilities": "XLU", "real_estate": "XLRE"
     }
 }
 

@@ -26,13 +26,14 @@ def calc_stats(r):
         "sharpe": sharpe, "total_return": float(curr.iloc[-1] - 1)
     }
 
-def compute_score(series, i, w1, w3, w6):
+def compute_score(series, i, w1, w3, w6, w12): # w12 hinzugefügt
     try:
         p = series
         ret1 = (p.iloc[i]/p.iloc[i-1]-1)
         ret3 = (p.iloc[i]/p.iloc[i-3]-1)
         ret6 = (p.iloc[i]/p.iloc[i-6]-1)
-        return (w1 * ret1) + (w3 * ret3) + (w6 * ret6)
+        ret12 = (p.iloc[i]/p.iloc[i-12]-1) # Neuer 12M Return
+        return (w1 * ret1) + (w3 * ret3) + (w6 * ret6) + (w12 * ret12)
     except:
         return 0
 
@@ -66,6 +67,9 @@ def api():
         w1 = float(request.args.get("lookback_1m", 0.0))
         w3 = float(request.args.get("lookback_3m", 0.0))
         w6 = float(request.args.get("lookback_6m", 1.0))
+        w12 = float(request.args.get("lookback_12m", 0.0))
+
+
         huerde_factor = float(request.args.get("selection_huerde", 1.3))
         max_sectors = int(request.args.get("max_sectors", 4))
         sector_limit = float(request.args.get("sector_weight_total", 1.0))

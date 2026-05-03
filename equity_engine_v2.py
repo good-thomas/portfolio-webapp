@@ -26,13 +26,13 @@ def calc_stats(r):
         "sharpe": sharpe, "total_return": float(curr.iloc[-1] - 1)
     }
 
-def compute_score(series, i, w1, w3, w6, w12): # w12 hinzugefügt
+def compute_score(series, i, w1, w3, w6, w12):
     try:
         p = series
         ret1 = (p.iloc[i]/p.iloc[i-1]-1)
         ret3 = (p.iloc[i]/p.iloc[i-3]-1)
         ret6 = (p.iloc[i]/p.iloc[i-6]-1)
-        ret12 = (p.iloc[i]/p.iloc[i-12]-1) # Neuer 12M Return
+        ret12 = (p.iloc[i]/p.iloc[i-12]-1)
         return (w1 * ret1) + (w3 * ret3) + (w6 * ret6) + (w12 * ret12)
     except:
         return 0
@@ -68,8 +68,6 @@ def api():
         w3 = float(request.args.get("lookback_3m", 0.0))
         w6 = float(request.args.get("lookback_6m", 1.0))
         w12 = float(request.args.get("lookback_12m", 0.0))
-
-
         huerde_factor = float(request.args.get("selection_huerde", 1.3))
         max_sectors = int(request.args.get("max_sectors", 4))
         sector_limit = float(request.args.get("sector_weight_total", 1.0))
@@ -81,31 +79,32 @@ def api():
         
         prices_raw = raw.resample("ME").last().ffill()
 
-        # --- PADDING (Lücken füllen) ---
-        if "XLC" in prices_raw.columns:
-            prices_raw["XLC"] = prices_raw["XLC"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
-        if "XLRE" in prices_raw.columns:
-            prices_raw["XLRE"] = prices_raw["XLRE"].fillna(prices_raw["ACWI"])
-        if "SMH" in prices_raw.columns:
-            prices_raw["SMH"] = prices_raw["SMH"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
+        # Padding
+        for tk, ref in [("XLC", "XLK"), ("XLRE", "ACWI"), ("SMH", "XLK")]:
+            if tk in prices_raw.columns:
+                prices_raw[tk] = prices_raw[tk].fillna(prices_raw[ref] if ref in prices_raw.columns else prices_raw["ACWI"])
 
         inv_map = {v: k for k, v in mapping.items()}
         prices = prices_raw.rename(columns=inv_map).dropna()
         rets = prices.pct_change()
 
-        # --- BACKTEST LOGIK ---
+        # Start Index (mindestens 12 wegen Lookback)
         try:
-            start_i = np.where(prices.index >= pd.to_datetime(start_str))[0][0]
+            requested_start = pd.to_datetime(start_str)
+            start_i = np.where(prices.index >= requested_start)[0][0]
+            if start_i < 12: start_i = 12
         except:
             start_i = 12
 
         engine_rets, acwi_rets, dates, weight_hist = [], [], [], []
         prev_w = {}
 
+        # --- BACKTEST SCHLEIFE ---
         for i in range(start_i, len(prices)-1):
-            eq_score = compute_score(prices["equities"], i, w1, w3, w6)
+            # Hier wird w12 nun korrekt übergeben
+            eq_score = compute_score(prices["equities"], i, w1, w3, w6, w12)
             sectors = [c for c in prices.columns if c != "equities"]
-            scores = {s: compute_score(prices[s], i, w1, w3, w6) for s in sectors}
+            scores = {s: compute_score(prices[s], i, w1, w3, w6, w12) for s in sectors}
             
             huerde = eq_score * huerde_factor if eq_score > 0 else eq_score + 0.01
             qualified = {s: sc for s, sc in scores.items() if sc > huerde and sc > 0}

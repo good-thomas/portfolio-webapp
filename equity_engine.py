@@ -29,10 +29,9 @@ def calc_stats(r):
     }
 
 def compute_score(series, i):
-    """Verkürzter Lookback für schnellere Reaktion (6M, 3M, 1M)"""
+    """Gewichtung: 50% 1M, 30% 3M, 20% 6M"""
     try:
         p = series
-        # Neue Gewichtung: 50% 1M, 30% 3M, 20% 6M
         return 0.5*(p.iloc[i]/p.iloc[i-1]-1) + 0.3*(p.iloc[i]/p.iloc[i-3]-1) + 0.2*(p.iloc[i]/p.iloc[i-6]-1)
     except:
         return 0
@@ -82,29 +81,35 @@ def api():
             scores = {s: compute_score(prices[s], i) for s in sectors}
             
             # --- Strategie-Logik: Hürde & Selektion ---
-            
-            # 20% Outperformance-Hürde gegenüber ACWI
             huerde = eq_score * 1.2 if eq_score > 0 else eq_score + 0.02
             strong_sectors = {s: sc for s, sc in scores.items() if sc > huerde}
             
             sector_weights = {}
             
             if strong_sectors:
-                # Szenario A: Sektoren knacken 20% Hürde -> 70% Anteil gewichtet nach Stärke
-                total_s_score = sum(strong_sectors.values())
-                for s, sc in strong_sectors.items():
-                    sector_weights[s] = 0.70 * (sc / total_s_score)
+                # STABILISIERT: Summe der Absolutwerte gegen Division durch Null
+                total_s_score = sum(abs(sc) for sc in strong_sectors.values())
+                if total_s_score > 1e-9:
+                    for s, sc in strong_sectors.items():
+                        # Gewichtung gedeckelt auf max 70% Gesamtanteil
+                        sector_weights[s] = 0.70 * (abs(sc) / total_s_score)
+                else:
+                    for s in strong_sectors:
+                        sector_weights[s] = 0.70 / len(strong_sectors)
+
             else:
-                # Szenario B: Keine Hürdenreißer -> nimm Top 2 (wenn besser als ACWI)
                 better_than_acwi = {s: sc for s, sc in scores.items() if sc > eq_score}
                 top_2 = sorted(better_than_acwi, key=better_than_acwi.get, reverse=True)[:2]
                 
                 if top_2:
-                    total_t2_score = sum(better_than_acwi[s] for s in top_2)
-                    for s in top_2:
-                        sector_weights[s] = 0.70 * (better_than_acwi[s] / total_t2_score)
+                    total_t2_score = sum(abs(better_than_acwi[s]) for s in top_2)
+                    if total_t2_score > 1e-9:
+                        for s in top_2:
+                            sector_weights[s] = 0.70 * (abs(better_than_acwi[s]) / total_t2_score)
+                    else:
+                        for s in top_2:
+                            sector_weights[s] = 0.35 # 0.70 / 2
                 else:
-                    # Szenario C: Alles andere -> 70% fließen in ACWI zurück
                     sector_weights["equities"] = 0.70
 
             # Kombiniere mit 30% Basis-ACWI
@@ -115,11 +120,9 @@ def api():
             # --- DER CASH-FILTER ---
             final_weights = {}
             for asset, weight in temp_weights.items():
-                # Score prüfen: ACWI-Score für equities, sonst Sektor-Score
                 check_score = eq_score if asset == "equities" else scores.get(asset, -1)
                 if check_score > 0:
                     final_weights[asset] = weight
-                # Assets mit negativem Score bleiben leer (= Cash)
 
             # Performance-Berechnung
             all_assets = set(final_weights.keys()) | set(prev_w.keys())

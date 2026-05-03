@@ -82,13 +82,36 @@ def api():
         max_sectors = int(request.args.get("max_sectors", 3))
         sector_limit = float(request.args.get("sector_weight_total", 0.70))
 
-        # --- DATEN-PROZESSING ---
-        mapping = TICKERS.get(s_set, TICKERS["us_long_history"])
-        tickers = list(mapping.values())
-        raw = yf.download(tickers, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
-        inv_map = {v: k for k, v in mapping.items()}
-        prices = raw.rename(columns=inv_map).resample("ME").last().ffill().dropna()
-        rets = prices.pct_change()
+    # --- DATEN-PROZESSING ---
+    mapping = TICKERS.get(s_set, TICKERS["us_long_history"])
+    tickers = list(mapping.values())
+    raw = yf.download(tickers, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
+    
+    # Wir arbeiten erst mit den Tickersymbolen für das Padding
+    prices_raw = raw.resample("ME").last().ffill()
+
+    # --- START PADDING (Lücken füllen) ---
+    # XLC (Comm Services) mit XLK oder ACWI auffüllen
+    if "XLC" in prices_raw.columns:
+        prices_raw["XLC"] = prices_raw["XLC"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
+    
+    # XLRE (Real Estate) mit ACWI auffüllen
+    if "XLRE" in prices_raw.columns:
+        prices_raw["XLRE"] = prices_raw["XLRE"].fillna(prices_raw["ACWI"])
+
+    # SMH (Semis) mit XLK auffüllen
+    if "SMH" in prices_raw.columns:
+        prices_raw["SMH"] = prices_raw["SMH"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
+    # --- ENDE PADDING ---
+
+    # Jetzt umbenennen in deine internen Namen (software, semis, etc.)
+    inv_map = {v: k for k, v in mapping.items()}
+    prices = prices_raw.rename(columns=inv_map)
+
+    # Erst JETZT dropna() - das löscht nur noch die Zeit vor 2008/2009 (ACWI Start)
+    prices = prices.dropna()
+    
+    rets = prices.pct_change()
 
         try:
             start_i = np.where(prices.index >= pd.to_datetime(start_str))[0][0]

@@ -27,7 +27,6 @@ def calc_stats(r):
     }
 
 def compute_score(series, i, w1, w3, w6):
-    """ Dynamisches Scoring-Modell basierend auf variablen Gewichten """
     try:
         p = series
         ret1 = (p.iloc[i]/p.iloc[i-1]-1)
@@ -39,21 +38,14 @@ def compute_score(series, i, w1, w3, w6):
 
 # --- Konfiguration ---
 
-# --- Neue, agnostische Ticker-Struktur v3 ---
 TICKERS = {
-    "us_long_history": {  # Wir behalten den Namen bei, damit das Frontend nicht bricht
+    "us_long_history": {
         "equities": "ACWI",
-        # IT & Communication
         "software": "IGV", "semis": "SMH", "tech": "XLK", "media": "XLC",
-        # Industrials
         "defense": "ITA", "transport": "IYT", "industrials": "XLI",
-        # Health Care
         "biotech": "XBI", "healthcare": "XLV",
-        # Financials
         "banks": "KBE", "insurance": "KIE",
-        # Consumer
         "retail": "XRT", "staples": "XLP",
-        # Resources & Infrastructure
         "metals": "XME", "materials": "XLB", "energy": "XLE", 
         "utilities": "XLU", "real_estate": "XLRE"
     },
@@ -67,52 +59,37 @@ TICKERS = {
 @app.route("/api/equity-engine")
 def api():
     try:
-        # --- VARIABLE PARAMETER (VOM FRONTEND GESTEUERT) ---
+        # --- PARAMETER HOLEN ---
         s_set = request.args.get("sector_proxy_set", "us_long_history")
         cost_rate = float(request.args.get("cost_rate", 0.001))
         start_str = request.args.get("start_date", "2009-03-31")
+        w1 = float(request.args.get("lookback_1m", 0.0))
+        w3 = float(request.args.get("lookback_3m", 0.0))
+        w6 = float(request.args.get("lookback_6m", 1.0))
+        huerde_factor = float(request.args.get("selection_huerde", 1.3))
+        max_sectors = int(request.args.get("max_sectors", 4))
+        sector_limit = float(request.args.get("sector_weight_total", 1.0))
+
+        # --- DATEN-PROZESSING ---
+        mapping = TICKERS.get(s_set, TICKERS["us_long_history"])
+        tickers = list(mapping.values())
+        raw = yf.download(tickers, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
         
-        # Scoring-Gewichte
-        w1 = float(request.args.get("lookback_1m", 0.5))
-        w3 = float(request.args.get("lookback_3m", 0.3))
-        w6 = float(request.args.get("lookback_6m", 0.2))
-        
-        # Selektions-Parameter
-        huerde_factor = float(request.args.get("selection_huerde", 1.1)) # Multiplikator für ACWI-Score
-        max_sectors = int(request.args.get("max_sectors", 3))
-        sector_limit = float(request.args.get("sector_weight_total", 0.70))
+        prices_raw = raw.resample("ME").last().ffill()
 
-    # --- DATEN-PROZESSING ---
-    mapping = TICKERS.get(s_set, TICKERS["us_long_history"])
-    tickers = list(mapping.values())
-    raw = yf.download(tickers, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
-    
-    # Wir arbeiten erst mit den Tickersymbolen für das Padding
-    prices_raw = raw.resample("ME").last().ffill()
+        # --- PADDING (Lücken füllen) ---
+        if "XLC" in prices_raw.columns:
+            prices_raw["XLC"] = prices_raw["XLC"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
+        if "XLRE" in prices_raw.columns:
+            prices_raw["XLRE"] = prices_raw["XLRE"].fillna(prices_raw["ACWI"])
+        if "SMH" in prices_raw.columns:
+            prices_raw["SMH"] = prices_raw["SMH"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
 
-    # --- START PADDING (Lücken füllen) ---
-    # XLC (Comm Services) mit XLK oder ACWI auffüllen
-    if "XLC" in prices_raw.columns:
-        prices_raw["XLC"] = prices_raw["XLC"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
-    
-    # XLRE (Real Estate) mit ACWI auffüllen
-    if "XLRE" in prices_raw.columns:
-        prices_raw["XLRE"] = prices_raw["XLRE"].fillna(prices_raw["ACWI"])
+        inv_map = {v: k for k, v in mapping.items()}
+        prices = prices_raw.rename(columns=inv_map).dropna()
+        rets = prices.pct_change()
 
-    # SMH (Semis) mit XLK auffüllen
-    if "SMH" in prices_raw.columns:
-        prices_raw["SMH"] = prices_raw["SMH"].fillna(prices_raw["XLK"] if "XLK" in prices_raw.columns else prices_raw["ACWI"])
-    # --- ENDE PADDING ---
-
-    # Jetzt umbenennen in deine internen Namen (software, semis, etc.)
-    inv_map = {v: k for k, v in mapping.items()}
-    prices = prices_raw.rename(columns=inv_map)
-
-    # Erst JETZT dropna() - das löscht nur noch die Zeit vor 2008/2009 (ACWI Start)
-    prices = prices.dropna()
-    
-    rets = prices.pct_change()
-
+        # --- BACKTEST LOGIK ---
         try:
             start_i = np.where(prices.index >= pd.to_datetime(start_str))[0][0]
         except:
@@ -126,50 +103,27 @@ def api():
             sectors = [c for c in prices.columns if c != "equities"]
             scores = {s: compute_score(prices[s], i, w1, w3, w6) for s in sectors}
             
-            # --- OPPORTUNISTISCHE SELEKTION ---
             huerde = eq_score * huerde_factor if eq_score > 0 else eq_score + 0.01
-            # Filter: Nur Sektoren über Hürde UND mit positivem Momentum
             qualified = {s: sc for s, sc in scores.items() if sc > huerde and sc > 0}
-            
-            # Konzentration: Nimm nur die Top X Sektoren
             top_sectors = sorted(qualified, key=qualified.get, reverse=True)[:max_sectors]
             
             sector_weights = {}
-            base_acwi_weight = 1.0 - sector_limit # Der Teil, der immer im Markt bleibt
+            base_acwi_weight = 1.0 - sector_limit
             
             if top_sectors:
                 total_s_score = sum(abs(qualified[s]) for s in top_sectors)
-                if total_s_score > 1e-9:
-                    for s in top_sectors:
-                        sector_weights[s] = sector_limit * (qualified[s] / total_s_score)
-                else:
-                    for s in top_sectors:
-                        sector_weights[s] = sector_limit / len(top_sectors)
+                for s in top_sectors:
+                    sector_weights[s] = sector_limit * (qualified[s] / total_s_score if total_s_score > 0 else 1/len(top_sectors))
             
-            # --- ZUSAMMENFÜHRUNG ---
-            # Wir starten mit dem Basis-ACWI Anteil
-            temp_weights = {"equities": base_acwi_weight}
-            
-            # Falls Sektor-Gewichte nicht voll ausgeschöpft (weil keine gefunden), 
-            # fließt der Rest zurück in den ACWI (Agnostisches Prinzip)
-            current_sector_total = sum(sector_weights.values())
-            temp_weights["equities"] += (sector_limit - current_sector_total)
-            
+            temp_weights = {"equities": base_acwi_weight + (sector_limit - sum(sector_weights.values()))}
             for s, w in sector_weights.items():
                 temp_weights[s] = w
 
-            # --- RISK-OFF FILTER (CASH-LOGIK) ---
-            final_weights = {}
-            for asset, weight in temp_weights.items():
-                asset_score = eq_score if asset == "equities" else scores.get(asset, 0)
-                if asset_score > 0: # Nur investieren, wenn Momentum absolut positiv
-                    final_weights[asset] = weight
+            final_weights = {a: w for a, w in temp_weights.items() if (eq_score if a=="equities" else scores.get(a,0)) > 0}
 
-            # Performance & Kosten
             all_assets = set(final_weights.keys()) | set(prev_w.keys())
             turnover = sum(abs(final_weights.get(a, 0) - prev_w.get(a, 0)) for a in all_assets)
-            m_ret = sum(final_weights[a] * rets[a].iloc[i+1] for a in final_weights if a in rets.columns)
-            m_ret -= (turnover * cost_rate)
+            m_ret = sum(final_weights[a] * rets[a].iloc[i+1] for a in final_weights if a in rets.columns) - (turnover * cost_rate)
             
             engine_rets.append(float(m_ret))
             acwi_rets.append(float(rets["equities"].iloc[i+1]))
@@ -177,7 +131,6 @@ def api():
             weight_hist.append({"date": prices.index[i+1].strftime("%Y-%m-%d"), "weights": final_weights})
             prev_w = final_weights
 
-        # Resultate
         df_engine = pd.Series(engine_rets, index=dates)
         df_acwi = pd.Series(acwi_rets, index=dates)
         

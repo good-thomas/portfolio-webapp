@@ -29,7 +29,7 @@ def calc_stats(r):
     }
 
 def compute_score(series, i):
-    """Gewichtung: 50% 1M, 30% 3M, 20% 6M"""
+    """ Momentum-Score: 50% 1M, 30% 3M, 20% 6M """
     try:
         p = series
         return 0.5*(p.iloc[i]/p.iloc[i-1]-1) + 0.3*(p.iloc[i]/p.iloc[i-3]-1) + 0.2*(p.iloc[i]/p.iloc[i-6]-1)
@@ -62,6 +62,7 @@ def api():
         mapping = TICKERS.get(s_set, TICKERS["us_long_history"])
         tickers = list(mapping.values())
         
+        # Daten laden
         raw = yf.download(tickers, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
         inv_map = {v: k for k, v in mapping.items()}
         prices = raw.rename(columns=inv_map).resample("ME").last().ffill().dropna()
@@ -81,50 +82,48 @@ def api():
             scores = {s: compute_score(prices[s], i) for s in sectors}
             
             # --- Strategie-Logik: Hürde & Selektion ---
-            huerde = eq_score * 1.2 if eq_score > 0 else eq_score + 0.02
+            # Hürde leicht gesenkt auf 10% für bessere Reaktionszeit
+            huerde = eq_score * 1.1 if eq_score > 0 else eq_score + 0.01
             strong_sectors = {s: sc for s, sc in scores.items() if sc > huerde}
             
             sector_weights = {}
             
+            # Szenario: Sektoren identifizieren
             if strong_sectors:
                 # STABILISIERT: Summe der Absolutwerte gegen Division durch Null
                 total_s_score = sum(abs(sc) for sc in strong_sectors.values())
                 if total_s_score > 1e-9:
                     for s, sc in strong_sectors.items():
-                        # Gewichtung gedeckelt auf max 70% Gesamtanteil
                         sector_weights[s] = 0.70 * (abs(sc) / total_s_score)
                 else:
                     for s in strong_sectors:
                         sector_weights[s] = 0.70 / len(strong_sectors)
-
+            
+            # --- DER VERBESSERTE RE-INVEST-FILTER (Minimiert Cash-Drag) ---
+            # 30% Basis-ACWI ist das Minimum
+            temp_weights = {"equities": 0.30}
+            
+            if not strong_sectors:
+                # Wenn kein Sektor die Hürde nimmt -> Volle 70% zurück in ACWI
+                temp_weights["equities"] += 0.70
             else:
-                better_than_acwi = {s: sc for s, sc in scores.items() if sc > eq_score}
-                top_2 = sorted(better_than_acwi, key=better_than_acwi.get, reverse=True)[:2]
-                
-                if top_2:
-                    total_t2_score = sum(abs(better_than_acwi[s]) for s in top_2)
-                    if total_t2_score > 1e-9:
-                        for s in top_2:
-                            sector_weights[s] = 0.70 * (abs(better_than_acwi[s]) / total_t2_score)
+                # Sektoren gewichten, aber bei negativem Momentum zurück in ACWI schieben
+                for s, w in sector_weights.items():
+                    if scores.get(s, 0) > 0:
+                        temp_weights[s] = w
                     else:
-                        for s in top_2:
-                            sector_weights[s] = 0.35 # 0.70 / 2
-                else:
-                    sector_weights["equities"] = 0.70
+                        temp_weights["equities"] += w
 
-            # Kombiniere mit 30% Basis-ACWI
-            temp_weights = {"equities": sector_weights.get("equities", 0) + 0.30}
-            for s, w in sector_weights.items():
-                if s != "equities": temp_weights[s] = w
-
-            # --- DER CASH-FILTER ---
+            # --- FINALE CASH-PRÜFUNG ---
+            # Wir gehen nur in Cash, wenn der Markt (ACWI) selbst negatives Momentum hat
             final_weights = {}
             for asset, weight in temp_weights.items():
-                check_score = eq_score if asset == "equities" else scores.get(asset, -1)
-                if check_score > 0:
+                asset_score = eq_score if asset == "equities" else scores.get(asset, 0)
+                if asset_score > 0:
                     final_weights[asset] = weight
+                # Negativer Score führt hier zu Cash (0% Rendite)
 
-            # Performance-Berechnung
+            # Performance-Berechnung inklusive Turnover-Kosten
             all_assets = set(final_weights.keys()) | set(prev_w.keys())
             turnover = sum(abs(final_weights.get(a, 0) - prev_w.get(a, 0)) for a in all_assets)
             
@@ -134,6 +133,7 @@ def api():
             engine_rets.append(float(m_ret))
             acwi_rets.append(float(rets["equities"].iloc[i+1]))
             dates.append(prices.index[i+1])
+            
             weight_hist.append({
                 "date": prices.index[i+1].strftime("%Y-%m-%d"), 
                 "selected": [k for k, v in final_weights.items() if k != "equities"], 
@@ -141,7 +141,7 @@ def api():
             })
             prev_w = final_weights
 
-        # Output Generierung
+        # DataFrames für Statistiken
         df_engine = pd.Series(engine_rets, index=dates)
         df_acwi = pd.Series(acwi_rets, index=dates)
         

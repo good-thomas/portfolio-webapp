@@ -39,8 +39,9 @@ def compute_score(series, i, w1, w3, w6):
 
 # --- Konfiguration ---
 
+# --- Neue, agnostische Ticker-Struktur v3 ---
 TICKERS = {
-    "us_agnostic_v3": {
+    "us_long_history": {  # Wir behalten den Namen bei, damit das Frontend nicht bricht
         "equities": "ACWI",
         # IT & Communication
         "software": "IGV", "semis": "SMH", "tech": "XLK", "media": "XLC",
@@ -55,6 +56,11 @@ TICKERS = {
         # Resources & Infrastructure
         "metals": "XME", "materials": "XLB", "energy": "XLE", 
         "utilities": "XLU", "real_estate": "XLRE"
+    },
+    "ucits": {
+        "equities": "ACWI",
+        "energy": "WNRG.DE", "materials": "XMWS.DE", "technology": "IGPT.DE", "banks": "EXV1.DE",
+        "health": "WHEA.DE", "utilities": "WUTI.DE", "real_estate": "DPRE.DE"
     }
 }
 

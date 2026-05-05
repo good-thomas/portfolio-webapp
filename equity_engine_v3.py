@@ -113,8 +113,42 @@ def api_v3():
             dates.append(prices.index[i+1]); history.append({"date": prices.index[i+1].strftime("%Y-%m-%d"), "weights": weights, "mode": mode})
             months_active += 1
 
+    # --- Stats berechnen (wird erst ganz am Ende ausgeführt) ---
+        def get_p_stats(r_list):
+            r_ser = pd.Series(r_list)
+            if r_ser.empty: 
+                return {"cagr": 0, "max_drawdown": 0, "sharpe": 0}
+            
+            # Kumulative Performance für Drawdown
+            cum = (1 + r_ser).cumprod()
+            
+            # CAGR (Annualisierte Rendite)
+            y = len(r_ser) / 12
+            cagr = float(cum.iloc[-1]**(1/y) - 1) if y > 0 else 0
+            
+            # Max Drawdown
+            dd = float((cum / cum.cummax() - 1).min())
+            
+            # Sharpe Ratio (Risikolose Rendite hier der Einfachheit halber 0)
+            vola = float(r_ser.std() * math.sqrt(12))
+            sharpe = cagr / vola if vola > 0 else 0
+            
+            return {
+                "cagr": round(cagr, 4), 
+                "max_drawdown": round(dd, 4), 
+                "sharpe": round(sharpe, 4)
+            }
+
         return jsonify({
-            "series": {"dates": [d.strftime("%Y-%m-%d") for d in dates], "equity_engine": (1 + pd.Series(res_rets)).cumprod().tolist(), "acwi": (1 + pd.Series(acwi_rets)).cumprod().tolist()},
+            "series": {
+                "dates": [d.strftime("%Y-%m-%d") for d in dates], 
+                "equity_engine": (1 + pd.Series(res_rets)).cumprod().tolist(), 
+                "acwi": (1 + pd.Series(acwi_rets)).cumprod().tolist()
+            },
+            "performance": {
+                "equity_engine": get_p_stats(res_rets),
+                "acwi": get_p_stats(acwi_rets)
+            },
             "weight_history": history
         })
     except Exception as e:

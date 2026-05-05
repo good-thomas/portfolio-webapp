@@ -37,58 +37,77 @@ def compute_score(series, i, w1, w3, w6, w12):
     except:
         return 0
 
-# --- Konfiguration ---
+# --- KONFIGURATION: 20-Ticker Universum (Überschneidungsfrei) ---
 
 TICKERS = {
     "us_long_history": {
         "equities": "ACWI",
-        "software": "IGV", "semis": "SMH", "tech": "XLK", "media": "XLC",
-        "defense": "ITA", "transport": "IYT", "industrials": "XLI",
-        "biotech": "XBI", "healthcare": "XLV",
-        "banks": "KBE", "insurance": "KIE",
+        # Industrials & Defense
+        "defense": "ITA", "transport": "IYT", "infra_build": "IGF",
+        # Technology & Communication
+        "software": "IGV", "semis": "SMH", "cybersecurity": "HACK", "media_comm": "XLC",
+        # Health Care
+        "biotech": "XBI", "healthcare_pharma": "XLV", "medtech": "IHI",
+        # Financials
+        "banks": "KBE", "insurance_brokers": "IAI",
+        # Consumer
         "retail": "XRT", "staples": "XLP",
-        "metals": "XME", "materials": "XLB", "energy": "XLE", 
+        # Materials & Energy
+        "metals_mining": "XME", "energy_oil_gas": "XLE", "uranium": "URA", "materials_chem": "XLB",
+        # Defensive / Diversifiers
         "utilities": "XLU", "real_estate": "XLRE"
-    },
-    "ucits": {
-        "equities": "ACWI",
-        "energy": "WNRG.DE", "materials": "XMWS.DE", "technology": "IGPT.DE", "banks": "EXV1.DE",
-        "health": "WHEA.DE", "utilities": "WUTI.DE", "real_estate": "DPRE.DE"
     }
 }
 
 @app.route("/api/equity-engine")
 def api():
     try:
-        # --- PARAMETER HOLEN ---
         s_set = request.args.get("sector_proxy_set", "us_long_history")
         cost_rate = float(request.args.get("cost_rate", 0.001))
         start_str = request.args.get("start_date", "2009-03-31")
-        w1 = float(request.args.get("lookback_1m", 0.0))
-        w3 = float(request.args.get("lookback_3m", 0.0))
-        w6 = float(request.args.get("lookback_6m", 1.0))
-        w12 = float(request.args.get("lookback_12m", 0.0))
+        w1, w3, w6, w12 = [float(request.args.get(f"lookback_{m}m", 0.0)) for m in [1, 3, 6, 12]]
         huerde_factor = float(request.args.get("selection_huerde", 1.3))
-        max_sectors = int(request.args.get("max_sectors", 4))
+        max_sectors = int(request.args.get("max_sectors", 5)) # Erhöht auf 5 bei 20 Tickern
         sector_limit = float(request.args.get("sector_weight_total", 1.0))
 
-        # --- DATEN-PROZESSING ---
         mapping = TICKERS.get(s_set, TICKERS["us_long_history"])
         tickers = list(mapping.values())
         raw = yf.download(tickers, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
         
         prices_raw = raw.resample("ME").last().ffill()
 
-        # Padding
-        for tk, ref in [("XLC", "XLK"), ("XLRE", "ACWI"), ("SMH", "XLK")]:
-            if tk in prices_raw.columns:
-                prices_raw[tk] = prices_raw[tk].fillna(prices_raw[ref] if ref in prices_raw.columns else prices_raw["ACWI"])
+        # --- INTELLIGENTES RATIO-PADDING ---
+        # (Ticker, Historischer Proxy)
+        padding_pairs = [
+            ("XLC", "XLK"), ("XLRE", "ACWI"), ("SMH", "XLK"), 
+            ("HACK", "IGV"), ("URA", "XLE"), ("ITA", "XLI"), 
+            ("IYT", "XLI"), ("IGV", "XLK"), ("KBE", "XLF"), 
+            ("KIE", "XLF"), ("XME", "XLB"), ("XRT", "XLY"), 
+            ("XBI", "XLV"), ("IAI", "XLF"), ("IHI", "XLV"),
+            ("IGF", "XLI")
+        ]
+
+        # Wir laden XLI, XLK, XLF, XLY kurz nach, falls sie nicht in TICKERS sind, aber als Proxy dienen
+        proxies_needed = ["XLI", "XLK", "XLF", "XLY"]
+        proxy_data = yf.download(proxies_needed, start="2000-01-01", auto_adjust=True, progress=False)["Close"]
+        proxy_data = proxy_data.resample("ME").last().ffill()
+        
+        # Merge Proxies in prices_raw für das Padding
+        prices_raw = pd.concat([prices_raw, proxy_data], axis=1)
+
+        for tk, ref in padding_pairs:
+            if tk in prices_raw.columns and ref in prices_raw.columns:
+                if prices_raw[tk].isnull().any():
+                    first_valid = prices_raw[tk].first_valid_index()
+                    if first_valid:
+                        ratio = prices_raw[tk].loc[first_valid] / prices_raw[ref].loc[first_valid]
+                        prices_raw[tk] = prices_raw[tk].fillna(prices_raw[ref] * ratio)
 
         inv_map = {v: k for k, v in mapping.items()}
-        prices = prices_raw.rename(columns=inv_map).dropna()
+        prices = prices_raw[list(mapping.values())].rename(columns=inv_map).dropna()
         rets = prices.pct_change()
 
-        # Start Index (mindestens 12 wegen Lookback)
+        # Start Index
         try:
             requested_start = pd.to_datetime(start_str)
             start_i = np.where(prices.index >= requested_start)[0][0]
@@ -101,7 +120,6 @@ def api():
 
         # --- BACKTEST SCHLEIFE ---
         for i in range(start_i, len(prices)-1):
-            # Hier wird w12 nun korrekt übergeben
             eq_score = compute_score(prices["equities"], i, w1, w3, w6, w12)
             sectors = [c for c in prices.columns if c != "equities"]
             scores = {s: compute_score(prices[s], i, w1, w3, w6, w12) for s in sectors}
@@ -119,14 +137,13 @@ def api():
                     sector_weights[s] = sector_limit * (qualified[s] / total_s_score if total_s_score > 0 else 1/len(top_sectors))
             
             temp_weights = {"equities": base_acwi_weight + (sector_limit - sum(sector_weights.values()))}
-            for s, w in sector_weights.items():
-                temp_weights[s] = w
+            for s, w in sector_weights.items(): temp_weights[s] = w
 
             final_weights = {a: w for a, w in temp_weights.items() if (eq_score if a=="equities" else scores.get(a,0)) > 0}
 
             all_assets = set(final_weights.keys()) | set(prev_w.keys())
             turnover = sum(abs(final_weights.get(a, 0) - prev_w.get(a, 0)) for a in all_assets)
-            m_ret = sum(final_weights[a] * rets[a].iloc[i+1] for a in final_weights if a in rets.columns) - (turnover * cost_rate)
+            m_ret = sum(final_weights[a] * rets[a].iloc[i+1] for a in final_weights) - (turnover * cost_rate)
             
             engine_rets.append(float(m_ret))
             acwi_rets.append(float(rets["equities"].iloc[i+1]))

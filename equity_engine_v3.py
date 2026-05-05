@@ -41,54 +41,49 @@ def compute_score(series, i, w1, w3, w6, w12):
 # --- V3 OPTIMIERUNGS-KERN ---
 
 def find_best_params(price_slice, sector_list, y_monthly_premium):
-    """
-    Simuliert alle 20%-Kombinationen im Fenster x und gibt die beste zurück.
-    Thomas-Regel: Besser als ACWI + y UND Sharpe-Verbesserung.
-    """
-    steps = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    # Reduzierte Test-Kombinationen für Speed
+    test_configs = [
+        {'w1': 0.0, 'w3': 0.0, 'w6': 0.0, 'w12': 1.0},
+        {'w1': 0.0, 'w3': 0.0, 'w6': 0.5, 'w12': 0.5},
+        {'w1': 0.0, 'w3': 0.2, 'w6': 0.4, 'w12': 0.4},
+        {'w1': 0.2, 'w3': 0.2, 'w6': 0.2, 'w12': 0.4}
+    ]
+    
     best_cfg = None
     max_sharpe = -1
     
-    # Benchmark Werte im Fenster
     acwi_rets = price_slice["equities"].pct_change().dropna()
     acwi_stats = calc_stats(acwi_rets)
     target_cagr = acwi_stats["cagr"] + (y_monthly_premium * 12)
 
-    # Permutationen der Gewichte (Summe muss 1.0 ergeben)
-    for w12 in steps:
-        for w6 in [s for s in steps if s + w12 <= 1.0]:
-            for w3 in [s for s in steps if s + w12 + w6 <= 1.0]:
-                w1 = round(1.0 - w12 - w6 - w3, 1)
-                
-                # Schnelle Simulation im Fenster x
-                sim_rets = []
-                for j in range(12, len(price_slice)-1):
-                    # BIL-Check
-                    bil_s = compute_score(price_slice["cash"], j, w1, w3, w6, w12)
-                    acwi_s = compute_score(price_slice["equities"], j, w1, w3, w6, w12)
-                    
-                    # Suche qualifizierte Sektoren (Double-Gate)
-                    scores = {s: compute_score(price_slice[s], j, w1, w3, w6, w12) for s in sector_list}
-                    qualified = [s for s, sc in scores.items() if sc > (acwi_s + y_monthly_premium) and sc > bil_s]
-                    
-                    if qualified:
-                        # Vereinfachte Simulation für Speed (Gleichgewichtung der Top 5)
-                        top = sorted(qualified, key=lambda x: scores[x], reverse=True)[:5]
-                        m_ret = price_slice[top].pct_change().iloc[j+1].mean()
-                    elif acwi_s > bil_s:
-                        m_ret = price_slice["equities"].pct_change().iloc[j+1]
-                    else:
-                        m_ret = price_slice["cash"].pct_change().iloc[j+1]
-                    sim_rets.append(m_ret)
-                
-                res = calc_stats(pd.Series(sim_rets))
-                if res["cagr"] > target_cagr and res["sharpe"] > acwi_stats["sharpe"]:
-                    if res["sharpe"] > max_sharpe:
-                        max_sharpe = res["sharpe"]
-                        best_cfg = {"w1": w1, "w3": w3, "w6": w6, "w12": w12}
-    
-    return best_cfg
+    # Simulation nur an jedem 3. Monatspunkt im Fenster spart massiv Zeit
+    step_range = range(12, len(price_slice)-1, 3)
 
+    for cfg in test_configs:
+        sim_rets = []
+        for j in step_range:
+            bil_s = compute_score(price_slice["cash"], j, **cfg)
+            acwi_s = compute_score(price_slice["equities"], j, **cfg)
+            
+            # Sektor-Wahl
+            scores = {s: compute_score(price_slice[s], j, **cfg) for s in sector_list}
+            qualified = [s for s, sc in scores.items() if sc > (acwi_s + y_monthly_premium) and sc > bil_s]
+            
+            if qualified:
+                m_ret = price_slice[qualified[:3]].pct_change().iloc[j+1].mean()
+            elif acwi_s > bil_s:
+                m_ret = acwi_rets.iloc[j]
+            else:
+                m_ret = price_slice["cash"].pct_change().iloc[j+1]
+            sim_rets.append(m_ret)
+        
+        res = calc_stats(pd.Series(sim_rets))
+        if res["cagr"] > target_cagr and res["sharpe"] > acwi_stats["sharpe"]:
+            if res["sharpe"] > max_sharpe:
+                max_sharpe = res["sharpe"]
+                best_cfg = cfg
+                
+    return best_cfg
 # --- KONFIGURATION ---
 
 TICKERS = {

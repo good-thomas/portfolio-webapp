@@ -6,7 +6,7 @@ import os, traceback
 app = Flask(__name__)
 CORS(app)
 
-# --- MASTER ENGINE V3.5 (Thomas Edition: V3 Logic + Score Weighting) ---
+# --- MASTER ENGINE V3.5.1 (Fixed Costs & Score Weighting) ---
 
 TICKERS_V3 = {
     "equities": "ACWI", "cash": "BIL",
@@ -27,6 +27,8 @@ def api_v3():
         x_win = int(request.args.get("opt_window_x", 36))
         y_pa = float(request.args.get("hurdle_y_pa", 0.02)) / 12
         z_lock = int(request.args.get("lock_z", 6))
+        # NEU: Kosten aus dem Request auslesen (Standard 0.1%)
+        cost_rate = float(request.args.get("cost_rate", 0.001))
         
         mapping = TICKERS_V3["sectors"]
         all_t = [TICKERS_V3["equities"], TICKERS_V3["cash"]] + list(mapping.values())
@@ -53,14 +55,13 @@ def api_v3():
         
         res_rets, acwi_rets, dates, history = [], [], [], []
         curr_p, mode, months_active = configs[0], "INIT", 0
+        last_weights = {} # Für Kostenberechnung
         sector_cols = list(mapping.keys())
 
         for i in range(start_i, len(prices)-1):
-            # Optimierung der Regel (V3-Stil: Erster Treffer)
             if months_active >= z_lock or mode != "ALPHA":
                 best_cfg = configs[0]
                 window_rets = rets_df.iloc[i-x_win:i]
-                
                 for cfg in configs:
                     s_score = (window_rets * cfg.get('w1', 0) + window_rets.rolling(3).mean() * cfg.get('w3', 0) + 
                                window_rets.rolling(6).mean() * cfg.get('w6', 0) + window_rets.rolling(12).mean() * cfg.get('w12', 0)).iloc[-1]
@@ -68,7 +69,6 @@ def api_v3():
                 curr_p = best_cfg
                 months_active = 0
 
-            # Signal Check
             def get_s(col):
                 p_vec = prices[col]
                 return (curr_p.get('w1',0)*(p_vec.iloc[i]/p_vec.iloc[i-1]-1) + 
@@ -77,27 +77,36 @@ def api_v3():
 
             scores = {s: get_s(s) for s in sector_cols}
             eq_s, cash_s = get_s("equities"), get_s("cash")
-            
-            # Identifizierung der qualifizierten Sektoren
             qual = {s: sc for s, sc in scores.items() if sc > (eq_s + y_pa) and sc > cash_s}
             
             weights = {}
             if qual:
                 top_keys = sorted(qual, key=qual.get, reverse=True)[:5]
-                # NEU: Score-proportionale Gewichtung statt 1.0/len(top)
                 sum_scores = sum(qual[k] for k in top_keys)
-                for k in top_keys:
-                    weights[k] = round(qual[k] / sum_scores, 4)
+                for k in top_keys: weights[k] = round(qual[k] / sum_scores, 4)
                 mode = "ALPHA"
             elif eq_s > cash_s:
                 weights["equities"] = 1.0; mode = "BETA"
             else:
                 weights["cash"] = 1.0; mode = "CASH"
 
-            m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in weights.items())
-            res_rets.append(m_ret); acwi_rets.append(rets_df["equities"].iloc[i+1])
+            # --- KOSTENBERECHNUNG (Turnover) ---
+            turnover = 0
+            all_assets = set(list(weights.keys()) + list(last_weights.keys()))
+            for a in all_assets:
+                turnover += abs(weights.get(a, 0) - last_weights.get(a, 0))
+            
+            m_cost = turnover * cost_rate
+            
+            # Rendite nach Kosten
+            m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in weights.items()) - m_cost
+            
+            res_rets.append(m_ret)
+            acwi_rets.append(rets_df["equities"].iloc[i+1])
             dates.append(prices.index[i+1])
             history.append({"date": prices.index[i+1].strftime("%Y-%m-%d"), "weights": weights, "mode": mode})
+            
+            last_weights = weights.copy()
             months_active += 1
 
         def get_p_stats(r_list):

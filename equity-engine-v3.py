@@ -6,7 +6,7 @@ import os, traceback
 app = Flask(__name__)
 CORS(app)
 
-# --- MASTER ENGINE V3.5.1 (Fixed Costs & Score Weighting) ---
+# --- MASTER ENGINE V3.6 (Thomas Edition: Best-Score Rule Rotation) ---
 
 TICKERS_V3 = {
     "equities": "ACWI", "cash": "BIL",
@@ -27,7 +27,6 @@ def api_v3():
         x_win = int(request.args.get("opt_window_x", 36))
         y_pa = float(request.args.get("hurdle_y_pa", 0.02)) / 12
         z_lock = int(request.args.get("lock_z", 6))
-        # NEU: Kosten aus dem Request auslesen (Standard 0.1%)
         cost_rate = float(request.args.get("cost_rate", 0.001))
         
         mapping = TICKERS_V3["sectors"]
@@ -44,9 +43,12 @@ def api_v3():
         prices = df.rename(columns=inv_map)[[c for c in inv_map.values() if c in df.rename(columns=inv_map).columns]]
         rets_df = prices.pct_change().fillna(0)
         
+        # Die vier Strategie-Regeln
         configs = [
-            {'w6': 0.2, 'w12': 0.8}, {'w6': 0.5, 'w12': 0.5},
-            {'w3': 0.3, 'w6': 0.4, 'w12': 0.3}, {'w1': 0.2, 'w3': 0.3, 'w6': 0.3, 'w12': 0.2}
+            {'name': 'Long-Term', 'w6': 0.2, 'w12': 0.8}, 
+            {'name': 'Balanced', 'w6': 0.5, 'w12': 0.5},
+            {'name': 'Medium-Term', 'w3': 0.3, 'w6': 0.4, 'w12': 0.3}, 
+            {'name': 'Agile', 'w1': 0.2, 'w3': 0.3, 'w6': 0.3, 'w12': 0.2}
         ]
 
         # 3. Backtest-Loop
@@ -55,20 +57,35 @@ def api_v3():
         
         res_rets, acwi_rets, dates, history = [], [], [], []
         curr_p, mode, months_active = configs[0], "INIT", 0
-        last_weights = {} # Für Kostenberechnung
+        last_weights = {} 
         sector_cols = list(mapping.keys())
 
         for i in range(start_i, len(prices)-1):
+            # --- NEU: BEST-SCORE OPTIMIERUNG ---
             if months_active >= z_lock or mode != "ALPHA":
                 best_cfg = configs[0]
+                max_overall_score = -999
                 window_rets = rets_df.iloc[i-x_win:i]
+                
                 for cfg in configs:
-                    s_score = (window_rets * cfg.get('w1', 0) + window_rets.rolling(3).mean() * cfg.get('w3', 0) + 
-                               window_rets.rolling(6).mean() * cfg.get('w6', 0) + window_rets.rolling(12).mean() * cfg.get('w12', 0)).iloc[-1]
-                    if s_score.max() > 0: best_cfg = cfg; break 
+                    # Berechne Scores für alle Sektoren mit dieser spezifischen Regel
+                    s_scores = (window_rets * cfg.get('w1', 0) + 
+                                window_rets.rolling(3).mean() * cfg.get('w3', 0) + 
+                                window_rets.rolling(6).mean() * cfg.get('w6', 0) + 
+                                window_rets.rolling(12).mean() * cfg.get('w12', 0)).iloc[-1]
+                    
+                    # Finde den stärksten Sektor-Score dieser Regel
+                    current_max = s_scores.max()
+                    
+                    # Wettbewerb: Nimm die Regel, die das stärkste Momentum sieht
+                    if current_max > max_overall_score:
+                        max_overall_score = current_max
+                        best_cfg = cfg
+                
                 curr_p = best_cfg
                 months_active = 0
 
+            # Signal Check mit der gewählten Gewinner-Regel
             def get_s(col):
                 p_vec = prices[col]
                 return (curr_p.get('w1',0)*(p_vec.iloc[i]/p_vec.iloc[i-1]-1) + 
@@ -90,21 +107,21 @@ def api_v3():
             else:
                 weights["cash"] = 1.0; mode = "CASH"
 
-            # --- KOSTENBERECHNUNG (Turnover) ---
-            turnover = 0
-            all_assets = set(list(weights.keys()) + list(last_weights.keys()))
-            for a in all_assets:
-                turnover += abs(weights.get(a, 0) - last_weights.get(a, 0))
-            
+            # Turnover & Kosten
+            turnover = sum(abs(weights.get(a, 0) - last_weights.get(a, 0)) for a in set(list(weights.keys()) + list(last_weights.keys())))
             m_cost = turnover * cost_rate
             
-            # Rendite nach Kosten
             m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in weights.items()) - m_cost
             
             res_rets.append(m_ret)
             acwi_rets.append(rets_df["equities"].iloc[i+1])
             dates.append(prices.index[i+1])
-            history.append({"date": prices.index[i+1].strftime("%Y-%m-%d"), "weights": weights, "mode": mode})
+            history.append({
+                "date": prices.index[i+1].strftime("%Y-%m-%d"), 
+                "weights": weights, 
+                "mode": mode,
+                "rule": curr_p.get('name', 'N/A') # Zeigt im Log, welche Regel aktiv ist
+            })
             
             last_weights = weights.copy()
             months_active += 1
@@ -125,10 +142,7 @@ def api_v3():
                 "equity_engine": (1 + pd.Series(res_rets)).cumprod().tolist(), 
                 "acwi": (1 + pd.Series(acwi_rets)).cumprod().tolist()
             },
-            "performance": {
-                "equity_engine": get_p_stats(res_rets),
-                "acwi": get_p_stats(acwi_rets)
-            },
+            "performance": {"equity_engine": get_p_stats(res_rets), "acwi": get_p_stats(acwi_rets)},
             "weight_history": history
         })
     except Exception as e:

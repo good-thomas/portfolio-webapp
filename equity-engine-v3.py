@@ -6,23 +6,34 @@ import os, traceback
 app = Flask(__name__)
 CORS(app)
 
-# --- MASTER ENGINE V3.5.2 (Rule-Logging & Score Weighting) ---
+# --- MASTER ENGINE V3.5.3 (Expanded Universe & Robust Data Padding) ---
 
 TICKERS_V3 = {
     "equities": "ACWI", "cash": "BIL",
     "sectors": {
-        "defense": "ITA", "transport": "IYT", "infra": "IGF", "software": "IGV", 
-        "semis": "SMH", "cyber": "HACK", "media": "XLC", "biotech": "XBI", 
-        "pharma": "XLV", "medtech": "IHI", "banks": "KBE", "brokers": "IAI", 
-        "retail": "XRT", "staples": "XLP", "metals": "XME", "energy": "XLE", 
-        "uranium": "URA", "chem": "XLB", "utilities": "XLU", "real_estate": "XLRE"
+        # Tech / Digital
+        "semis": "SMH", "software": "IGV", "cyber": "HACK", "media": "XLC", 
+        "data_center": "SRVR", "robotics": "BOTZ",
+        # Health
+        "biotech": "XBI", "pharma": "XLV", "medtech": "IHI",
+        # Finance
+        "banks": "KBE", "brokers": "IAI", "insurance": "KIE",
+        # Industry / Infra
+        "defense": "ITA", "infra_global": "IGF", "infra_us": "PAVE", 
+        "transport": "IYT", "smart_grid": "GRID", "industry": "XLI",
+        # Resources
+        "energy": "XLE", "uranium": "URA", "metals": "XME", "copper": "COPX", "gold_miners": "GDX",
+        # Consumer / Others
+        "retail": "XRT", "staples": "XLP", "homebuilders": "XHB", "utilities": "XLU", "real_estate": "XLRE",
+        # Regions / Regions
+        "emerging": "EEM", "china": "FXI", "india": "INDA"
     }
 }
 
 @app.route("/api/equity-engine-v3")
 def api_v3():
     try:
-        # 1. Parameter & Daten-Setup
+        # 1. Parameter
         start_date = pd.to_datetime(request.args.get("start_date", "2015-01-01"))
         x_win = int(request.args.get("opt_window_x", 36))
         y_pa = float(request.args.get("hurdle_y_pa", 0.02)) / 12
@@ -32,18 +43,28 @@ def api_v3():
         mapping = TICKERS_V3["sectors"]
         all_t = [TICKERS_V3["equities"], TICKERS_V3["cash"]] + list(mapping.values())
         
-        raw = yf.download(all_t + ["SHV", "XLK", "XLI"], start="2000-01-01", auto_adjust=True, progress=False)["Close"]
+        # 2. Daten laden & Padding (für junge ETFs)
+        raw = yf.download(all_t + ["SHV", "XLK"], start="2000-01-01", auto_adjust=True, progress=False)["Close"]
         df = raw.resample("ME").last().ffill()
         
+        # Spezial-Padding für BIL und XLC (Historie-Verlängerung)
         if "BIL" in df and "SHV" in df: df["BIL"] = df["BIL"].fillna(df["SHV"] * (df["BIL"].dropna().iloc[0]/df["SHV"].loc[df["BIL"].dropna().index[0]]))
         if "XLC" in df and "XLK" in df: df["XLC"] = df["XLC"].fillna(df["XLK"] * (df["XLC"].dropna().iloc[0]/df["XLK"].loc[df["XLK"].dropna().index[0]]))
         
+        # Generisches Padding für alle anderen (nutze ACWI als Proxy für fehlende Historie)
+        acwi_col = TICKERS_V3["equities"]
+        for col in df.columns:
+            if col != acwi_col and df[col].isnull().any():
+                first_valid = df[col].first_valid_index()
+                if first_valid:
+                    ratio = df[col].loc[first_valid] / df[acwi_col].loc[first_valid]
+                    df[col] = df[col].fillna(df[acwi_col] * ratio)
+
         inv_map = {v: k for k, v in mapping.items()}
         inv_map[TICKERS_V3["equities"]] = "equities"; inv_map[TICKERS_V3["cash"]] = "cash"
         prices = df.rename(columns=inv_map)[[c for c in inv_map.values() if c in df.rename(columns=inv_map).columns]]
         rets_df = prices.pct_change().fillna(0)
         
-        # NEU: Regeln mit Namen versehen für das Logging
         configs = [
             {'name': 'Long (6/12)', 'w6': 0.2, 'w12': 0.8}, 
             {'name': 'Balanced (6/12)', 'w6': 0.5, 'w12': 0.5},
@@ -61,7 +82,6 @@ def api_v3():
         sector_cols = list(mapping.keys())
 
         for i in range(start_i, len(prices)-1):
-            # Regel-Check
             if months_active >= z_lock or mode != "ALPHA":
                 best_cfg = configs[0]
                 window_rets = rets_df.iloc[i-x_win:i]
@@ -74,7 +94,6 @@ def api_v3():
                 curr_p = best_cfg
                 months_active = 0
 
-            # Signal Check
             def get_s(col):
                 p_vec = prices[col]
                 return (curr_p.get('w1',0)*(p_vec.iloc[i]/p_vec.iloc[i-1]-1) + 
@@ -96,7 +115,6 @@ def api_v3():
             else:
                 weights["cash"] = 1.0; mode = "CASH"
 
-            # Turnover & Kosten
             turnover = sum(abs(weights.get(a, 0) - last_weights.get(a, 0)) for a in set(list(weights.keys()) + list(last_weights.keys())))
             m_cost = turnover * cost_rate
             m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in weights.items()) - m_cost
@@ -104,8 +122,6 @@ def api_v3():
             res_rets.append(m_ret)
             acwi_rets.append(rets_df["equities"].iloc[i+1])
             dates.append(prices.index[i+1])
-            
-            # NEU: 'rule' wird hier mitgeloggt
             history.append({
                 "date": prices.index[i+1].strftime("%Y-%m-%d"), 
                 "weights": weights, 

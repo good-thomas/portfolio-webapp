@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Equity Engine v3 Local Test</title>
+  <style>
+    body {
+      margin: 0;
+      background: #f3f4f6;
+      color: #222;
+      font-family: Arial, sans-serif;
+    }
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 32px auto;
+    }
+    .local-note {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      padding: 14px 16px;
+      font-size: 13px;
+      color: #555;
+    }
+    .local-note code {
+      color: #111;
+      font-size: 12px;
+    }
+    iframe {
+      width: 100%;
+      min-height: 1200px;
+      border: 0;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="local-note">
+      Lokaler Testmodus: Dieses Frontend ruft <code>http://localhost:5000/api/equity-engine-v3</code> auf.
+    </div>
+
+    <iframe id="ee-local-frame" title="Equity Engine local frontend"></iframe>
+    <script>
+      fetch("equity-engine-v3.html")
+        .then(function(res) { return res.text(); })
+        .then(function(html) {
+          document.getElementById("ee-local-frame").srcdoc =
+            '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+            '<script>window.EE_API_URL = "http://localhost:5000/api/equity-engine-v3";<\/script>' +
+            '</head><body>' + html + '</body></html>';
+        })
+        .catch(function(err) {
+          document.body.insertAdjacentHTML("beforeend", "<p>Frontend konnte nicht geladen werden: " + err.message + "</p>");
+        });
+    </script>
+  </main>
+</body>
+</html>

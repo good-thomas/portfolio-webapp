@@ -103,17 +103,19 @@ def get_p_stats(r_list):
 def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
     prices, rets_df, sector_cols = load_prices()
     configs = rule_configs()
-    always_long_cfg = {'name': 'Always Long (9/12)', 'w9': 0.20, 'w12': 0.80}
+    fixed_20_80_cfg = {'name': 'Fixed 20/80 (9/12)', 'w9': 0.20, 'w12': 0.80}
+    fixed_30_70_cfg = {'name': 'Fixed 30/70 (9/12)', 'w9': 0.30, 'w12': 0.70}
 
     start_i = np.where(prices.index >= start_date)[0][0]
     min_i = max(x_win, max(RULE_PERIODS))
     if start_i < min_i:
         start_i = min_i
 
-    res_rets, long_rets, acwi_rets, dates, history = [], [], [], [], []
+    res_rets, fixed_20_80_rets, fixed_30_70_rets, acwi_rets, dates, history = [], [], [], [], [], []
     curr_p, alpha_lock_remaining = None, 0
     last_weights = {}
-    last_long_weights = {}
+    last_fixed_20_80_weights = {}
+    last_fixed_30_70_weights = {}
 
     for i in range(start_i, len(prices)-1):
         window_start = i - x_win
@@ -155,12 +157,17 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
         turnover = sum(abs(weights.get(a, 0) - last_weights.get(a, 0)) for a in set(list(weights.keys()) + list(last_weights.keys())))
         m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in weights.items()) - (turnover * cost_rate)
 
-        long_weights, _long_mode = select_weights_for_rule(prices, always_long_cfg, i, sector_cols, y_pa)
-        long_turnover = sum(abs(long_weights.get(a, 0) - last_long_weights.get(a, 0)) for a in set(list(long_weights.keys()) + list(last_long_weights.keys())))
-        long_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in long_weights.items()) - (long_turnover * cost_rate)
+        fixed_20_80_weights, _fixed_20_80_mode = select_weights_for_rule(prices, fixed_20_80_cfg, i, sector_cols, y_pa)
+        fixed_20_80_turnover = sum(abs(fixed_20_80_weights.get(a, 0) - last_fixed_20_80_weights.get(a, 0)) for a in set(list(fixed_20_80_weights.keys()) + list(last_fixed_20_80_weights.keys())))
+        fixed_20_80_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_20_80_weights.items()) - (fixed_20_80_turnover * cost_rate)
+
+        fixed_30_70_weights, _fixed_30_70_mode = select_weights_for_rule(prices, fixed_30_70_cfg, i, sector_cols, y_pa)
+        fixed_30_70_turnover = sum(abs(fixed_30_70_weights.get(a, 0) - last_fixed_30_70_weights.get(a, 0)) for a in set(list(fixed_30_70_weights.keys()) + list(last_fixed_30_70_weights.keys())))
+        fixed_30_70_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_30_70_weights.items()) - (fixed_30_70_turnover * cost_rate)
 
         res_rets.append(m_ret)
-        long_rets.append(long_m_ret)
+        fixed_20_80_rets.append(fixed_20_80_m_ret)
+        fixed_30_70_rets.append(fixed_30_70_m_ret)
         acwi_rets.append(rets_df["equities"].iloc[i+1])
         dates.append(prices.index[i+1])
 
@@ -173,13 +180,16 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
         })
 
         last_weights = weights.copy()
-        last_long_weights = long_weights.copy()
+        last_fixed_20_80_weights = fixed_20_80_weights.copy()
+        last_fixed_30_70_weights = fixed_30_70_weights.copy()
 
     return {
         "dates": dates,
         "returns": {
             "equity_engine": res_rets,
-            "always_long": long_rets,
+            "always_long": fixed_20_80_rets,
+            "fixed_20_80": fixed_20_80_rets,
+            "fixed_30_70": fixed_30_70_rets,
             "acwi": acwi_rets
         },
         "weight_history": history
@@ -192,11 +202,15 @@ def backtest_response(result):
             "dates": [d.strftime("%Y-%m-%d") for d in result["dates"]],
             "equity_engine": (1 + pd.Series(result["returns"]["equity_engine"])).cumprod().tolist(),
             "always_long": (1 + pd.Series(result["returns"]["always_long"])).cumprod().tolist(),
+            "fixed_20_80": (1 + pd.Series(result["returns"]["fixed_20_80"])).cumprod().tolist(),
+            "fixed_30_70": (1 + pd.Series(result["returns"]["fixed_30_70"])).cumprod().tolist(),
             "acwi": (1 + pd.Series(result["returns"]["acwi"])).cumprod().tolist()
         },
         "performance": {
             "equity_engine": get_p_stats(result["returns"]["equity_engine"]),
             "always_long": get_p_stats(result["returns"]["always_long"]),
+            "fixed_20_80": get_p_stats(result["returns"]["fixed_20_80"]),
+            "fixed_30_70": get_p_stats(result["returns"]["fixed_30_70"]),
             "acwi": get_p_stats(result["returns"]["acwi"])
         },
         "weight_history": result["weight_history"]

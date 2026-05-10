@@ -32,7 +32,7 @@
   <div class="ee-box">
     <h2 style="margin-top:0; font-size:20px;">Equity Engine Pro v3.6.0</h2>
     <div class="ee-row">
-      <div class="ee-field"><label>Startdatum</label><input id="ee-start" type="text" value="2015-01-01" placeholder="YYYY-MM-DD"></div>
+      <div class="ee-field"><label>Startdatum</label><input id="ee-start" type="text" value="2011-01-01" placeholder="YYYY-MM-DD"></div>
       <div class="ee-field"><label>Fenster (x) <span class="slider-val" id="v-x">36</span></label><input id="ee-x" type="range" min="12" max="60" step="6" value="36"></div>
       <div class="ee-field"><label>Haltedauer (z) <span class="slider-val" id="v-z">6</span></label><input id="ee-z" type="range" min="1" max="12" step="1" value="6"></div>
     </div>
@@ -127,8 +127,9 @@
           data: {
             labels: data.series.dates,
             datasets: [
-              { label: "Engine v3.6.0", data: data.series.equity_engine, borderColor: "#326eaa", borderWidth: 2, pointRadius: 0 },
-              { label: "Always Long (9/12)", data: data.series.always_long, borderColor: "#7a4fb3", borderWidth: 2, pointRadius: 0 },
+              { label: "Dynamisch", data: data.series.equity_engine, borderColor: "#326eaa", borderWidth: 2, pointRadius: 0 },
+              { label: "Fixed 20/80", data: data.series.fixed_20_80, borderColor: "#7a4fb3", borderWidth: 2, pointRadius: 0 },
+              { label: "Fixed 30/70", data: data.series.fixed_30_70, borderColor: "#d58a24", borderWidth: 2, pointRadius: 0 },
               { label: "ACWI", data: data.series.acwi, borderColor: "#111", borderWidth: 1, pointRadius: 0, borderDash: [5, 5] }
             ]
           },
@@ -145,10 +146,10 @@
         if (data.performance) {
           const p = data.performance;
           document.getElementById("ee-stats").innerHTML = "<table>" +
-            "<tr><th></th><th>Dynamisch</th><th>Always Long</th><th>ACWI</th></tr>" +
-            '<tr><td>CAGR</td><td class="pos">' + (p.equity_engine.cagr * 100).toFixed(1) + "%</td><td>" + (p.always_long.cagr * 100).toFixed(1) + "%</td><td>" + (p.acwi.cagr * 100).toFixed(1) + "%</td></tr>" +
-            '<tr><td>MaxDD</td><td class="neg">' + (p.equity_engine.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.always_long.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.acwi.max_drawdown * 100).toFixed(1) + "%</td></tr>" +
-            "<tr><td>Sharpe</td><td>" + p.equity_engine.sharpe.toFixed(2) + "</td><td>" + p.always_long.sharpe.toFixed(2) + "</td><td>" + p.acwi.sharpe.toFixed(2) + "</td></tr></table>";
+            "<tr><th></th><th>Dynamisch</th><th>20/80</th><th>30/70</th><th>ACWI</th></tr>" +
+            '<tr><td>CAGR</td><td class="pos">' + (p.equity_engine.cagr * 100).toFixed(1) + "%</td><td>" + (p.fixed_20_80.cagr * 100).toFixed(1) + "%</td><td>" + (p.fixed_30_70.cagr * 100).toFixed(1) + "%</td><td>" + (p.acwi.cagr * 100).toFixed(1) + "%</td></tr>" +
+            '<tr><td>MaxDD</td><td class="neg">' + (p.equity_engine.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.fixed_20_80.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.fixed_30_70.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.acwi.max_drawdown * 100).toFixed(1) + "%</td></tr>" +
+            "<tr><td>Sharpe</td><td>" + p.equity_engine.sharpe.toFixed(2) + "</td><td>" + p.fixed_20_80.sharpe.toFixed(2) + "</td><td>" + p.fixed_30_70.sharpe.toFixed(2) + "</td><td>" + p.acwi.sharpe.toFixed(2) + "</td></tr></table>";
         }
 
         renderPerformanceMatrix(data.series.dates, data.series.equity_engine, data.series.acwi);

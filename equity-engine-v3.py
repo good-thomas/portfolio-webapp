@@ -86,7 +86,6 @@ def api_v3():
         
         # Regeln: unterschiedliche Gewichtung der 3/6/9/12/18-Monatsperformance
         configs = [
-            {'name': 'Agile (3/6)', 'w3': 0.80, 'w6': 0.20},
             {'name': 'Medium (6/9)', 'w6': 0.50, 'w9': 0.50},
             {'name': 'Long (9/12)', 'w9': 0.20, 'w12': 0.80},
             {'name': 'Extra Long (12/18)', 'w12': 0.50, 'w18': 0.50}

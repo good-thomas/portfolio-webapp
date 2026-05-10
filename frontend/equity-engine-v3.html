@@ -1,0 +1,196 @@
+<div id="ee-app" style="font-family:Arial,sans-serif; width:100%; color:#222; line-height:1.4;">
+  <style>
+    #ee-app .ee-box { border:1px solid #ddd; border-radius:10px; padding:20px; margin-bottom:20px; background:#fafafa; }
+    #ee-app .ee-row { display:flex; gap:15px; flex-wrap:wrap; align-items:end; margin-bottom:10px; }
+    #ee-app .ee-field { display:flex; flex-direction:column; min-width:120px; flex:1; }
+    #ee-app label { font-size:11px; font-weight:bold; margin-bottom:5px; color:#666; text-transform:uppercase; }
+    #ee-app input, #ee-app select { padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; background:#fff; }
+    #ee-app .slider-val { font-size:11px; color:#111; float:right; font-weight:bold; }
+    #ee-app input[type=range] { -webkit-appearance:none; width:100%; background:transparent; }
+    #ee-app input[type=range]::-webkit-slider-runnable-track { width:100%; height:6px; background:#ddd; border-radius:3px; }
+    #ee-app input[type=range]::-webkit-slider-thumb { height:16px; width:16px; border-radius:50%; background:#111; cursor:pointer; -webkit-appearance:none; margin-top:-5px; }
+    #ee-app #ee-run { padding:12px 25px; border:none; border-radius:6px; cursor:pointer; background:#111; color:white; font-weight:bold; width:100%; margin-top:10px; }
+    #ee-app #ee-run:disabled { opacity:.65; cursor:not-allowed; }
+    #ee-app table { width:100%; border-collapse:collapse; margin-top:15px; background:white; }
+    #ee-app th, #ee-app td { border:1px solid #eee; padding:10px; text-align:right; font-size:12px; }
+    #ee-app th { background:#f8f8f8; text-align:center; }
+    #ee-app .pos { color:#0a7a32 !important; font-weight:bold; }
+    #ee-app .neg { color:#b00020 !important; font-weight:bold; }
+    #ee-app .mode-tag { font-size:9px; padding:2px 5px; border-radius:3px; background:#eee; color:#555; font-weight:bold; }
+    #ee-app .chart-wrap { position:relative; width:100%; height:400px; margin-top:10px; background:#fff; border:1px solid #eee; border-radius:8px; padding:10px; box-sizing:border-box; }
+    #ee-app .ee-status { margin:10px 0 0; font-size:13px; color:#666; min-height:18px; }
+    #ee-app .ee-status.error { color:#b00020; font-weight:bold; }
+    #ee-app .ee-status.success { color:#0a7a32; font-weight:bold; }
+    @media (max-width: 720px) {
+      #ee-app .ee-field { min-width:100%; }
+      #ee-app .chart-wrap { height:320px; }
+      #ee-app th, #ee-app td { padding:8px; font-size:11px; }
+      #ee-app div[style*="grid-template-columns"] { grid-template-columns:1fr !important; }
+    }
+  </style>
+
+  <div class="ee-box">
+    <h2 style="margin-top:0; font-size:20px;">Equity Engine Pro v3.5.2</h2>
+    <div class="ee-row">
+      <div class="ee-field"><label>Startdatum</label><input id="ee-start" type="text" value="2015-01-01" placeholder="YYYY-MM-DD"></div>
+      <div class="ee-field"><label>Fenster (x) <span class="slider-val" id="v-x">36</span></label><input id="ee-x" type="range" min="12" max="60" step="6" value="36"></div>
+      <div class="ee-field"><label>Haltedauer (z) <span class="slider-val" id="v-z">6</span></label><input id="ee-z" type="range" min="1" max="12" step="1" value="6"></div>
+    </div>
+    <div class="ee-row">
+      <div class="ee-field"><label>Kosten</label><input id="ee-cost" type="number" step="0.0005" value="0.001"></div>
+      <div class="ee-field"><label>Prämie p.a. (y) <span class="slider-val" id="v-y">2.0%</span></label><input id="ee-y" type="range" min="0" max="10" step="0.5" value="2.0"></div>
+    </div>
+    <button id="ee-run" type="button">Adaptive Analyse starten</button>
+    <p id="ee-status" class="ee-status"></p>
+  </div>
+
+  <div class="ee-box"><h3>Kumulative Wertentwicklung</h3><div class="chart-wrap"><canvas id="ee-chart"></canvas></div></div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+    <div class="ee-box"><h3>Aktuelle Gewichtung</h3><div id="ee-weights"></div></div>
+    <div class="ee-box"><h3>Performance-Vergleich</h3><div id="ee-stats"></div></div>
+  </div>
+
+  <div class="ee-box"><h3>Performance-Matrix (%)</h3><div id="ee-matrix" style="overflow-x:auto;"></div></div>
+  <div class="ee-box"><h3>Historischer Verlauf</h3><div id="ee-history" style="overflow-x:auto;"></div></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    (function(){
+      const API_URL = "https://portfolio-webapp-kkxd.onrender.com/api/equity-engine-v3";
+      let chart = null;
+
+      function esc(x) {
+        return String(x == null ? "" : x).replace(/[&<>"]/g, function(c) {
+          return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c];
+        });
+      }
+
+      function setStatus(message, type) {
+        const el = document.getElementById("ee-status");
+        el.className = "ee-status" + (type ? " " + type : "");
+        el.textContent = message || "";
+      }
+
+      function validateInputs() {
+        const startDate = document.getElementById("ee-start").value.trim();
+        const costRate = Number(document.getElementById("ee-cost").value);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw new Error("Startdatum bitte im Format YYYY-MM-DD eingeben.");
+        if (!Number.isFinite(costRate) || costRate < 0) throw new Error("Kosten müssen eine positive Zahl sein.");
+      }
+
+      ["x", "y", "z"].forEach(function(s) {
+        const el = document.getElementById("ee-" + s);
+        if (el) el.oninput = function() {
+          let val = el.value;
+          if (s === "y") val += "%";
+          document.getElementById("v-" + s).innerText = val;
+        };
+      });
+
+      function renderPerformanceMatrix(dates, engineValues, acwiValues) {
+        const engineMatrix = {}, acwiMatrix = {};
+        const months = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+        for (let i = 1; i < engineValues.length; i++) {
+          const d = new Date(dates[i]), y = d.getFullYear(), m = d.getMonth();
+          if (!engineMatrix[y]) { engineMatrix[y] = Array(12).fill(null); acwiMatrix[y] = Array(12).fill(null); }
+          engineMatrix[y][m] = (engineValues[i] / engineValues[i - 1]) - 1;
+          acwiMatrix[y][m] = (acwiValues[i] / acwiValues[i - 1]) - 1;
+        }
+        let h = "<table><tr><th>Jahr</th>" + months.map(function(m){ return "<th>" + m + "</th>"; }).join("") + "<th>YTD</th></tr>";
+        Object.keys(engineMatrix).sort(function(a,b){ return b - a; }).forEach(function(y) {
+          h += "<tr><td>" + y + "</td>";
+          let yrE = 1, yrA = 1;
+          engineMatrix[y].forEach(function(r, m) {
+            if (r === null) h += "<td>-</td>";
+            else {
+              yrE *= (1 + r); yrA *= (1 + acwiMatrix[y][m]);
+              const diff = (r - acwiMatrix[y][m]) * 100;
+              h += '<td class="' + (r > 0 ? "pos" : "neg") + '"><div>' + (r * 100).toFixed(1) + '%</div><div style="font-size:9px;color:#666">' + (diff >= 0 ? "+" : "") + diff.toFixed(1) + "</div></td>";
+            }
+          });
+          const ytdE = yrE - 1, ytdDiff = (ytdE - (yrA - 1)) * 100;
+          h += '<td style="border-left:2px solid #ddd" class="' + (ytdE > 0 ? "pos" : "neg") + '"><div>' + (ytdE * 100).toFixed(1) + '%</div><div style="font-size:9px;color:#666">' + (ytdDiff >= 0 ? "+" : "") + ytdDiff.toFixed(1) + "</div></td></tr>";
+        });
+        document.getElementById("ee-matrix").innerHTML = h + "</table>";
+      }
+
+      function renderUI(data) {
+        if (!data || !data.series || !data.weight_history || !data.weight_history.length) {
+          throw new Error("Die API-Antwort enthält keine auswertbaren Simulationsdaten.");
+        }
+
+        const ctx = document.getElementById("ee-chart").getContext("2d");
+        if (chart) chart.destroy();
+        chart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels: data.series.dates,
+            datasets: [
+              { label: "Engine v3.5.2", data: data.series.equity_engine, borderColor: "#326eaa", borderWidth: 2, pointRadius: 0 },
+              { label: "ACWI", data: data.series.acwi, borderColor: "#111", borderWidth: 1, pointRadius: 0, borderDash: [5, 5] }
+            ]
+          },
+          options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false } }
+        });
+
+        const lastW = data.weight_history[data.weight_history.length - 1].weights;
+        let wH = "<table>";
+        Object.entries(lastW).sort(function(a,b){ return b[1] - a[1]; }).forEach(function(entry) {
+          wH += "<tr><td>" + esc(entry[0]) + "</td><td>" + (entry[1] * 100).toFixed(1) + "%</td></tr>";
+        });
+        document.getElementById("ee-weights").innerHTML = wH + "</table>";
+
+        if (data.performance) {
+          const p = data.performance;
+          document.getElementById("ee-stats").innerHTML = "<table>" +
+            '<tr><td>CAGR</td><td class="pos">' + (p.equity_engine.cagr * 100).toFixed(1) + "%</td><td>" + (p.acwi.cagr * 100).toFixed(1) + "%</td></tr>" +
+            '<tr><td>MaxDD</td><td class="neg">' + (p.equity_engine.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.acwi.max_drawdown * 100).toFixed(1) + "%</td></tr>" +
+            "<tr><td>Sharpe</td><td>" + p.equity_engine.sharpe.toFixed(2) + "</td><td>" + p.acwi.sharpe.toFixed(2) + "</td></tr></table>";
+        }
+
+        renderPerformanceMatrix(data.series.dates, data.series.equity_engine, data.series.acwi);
+
+        let histH = "<table><tr><th>Datum</th><th>Modus</th><th>Regel</th><th>Mix</th></tr>";
+        data.weight_history.slice().reverse().slice(0, 200).forEach(function(r) {
+          const tags = Object.entries(r.weights).map(function(entry) {
+            return '<span style="font-size:10px;margin-right:5px;">' + esc(entry[0]) + ":" + (entry[1] * 100).toFixed(0) + "%</span>";
+          }).join("");
+          histH += '<tr><td style="width:100px">' + esc(r.date) + '</td><td><span class="mode-tag">' + esc(r.mode) + '</span></td><td>' + esc(r.rule || "-") + "</td><td>" + tags + "</td></tr>";
+        });
+        document.getElementById("ee-history").innerHTML = histH + "</table>";
+      }
+
+      async function run() {
+        const btn = document.getElementById("ee-run");
+        btn.disabled = true;
+        btn.innerText = "Berechne...";
+        setStatus("Berechnung läuft ...", "");
+        try {
+          validateInputs();
+          const params = new URLSearchParams({
+            start_date: document.getElementById("ee-start").value.trim(),
+            cost_rate: document.getElementById("ee-cost").value,
+            opt_window_x: document.getElementById("ee-x").value,
+            hurdle_y_pa: (document.getElementById("ee-y").value / 100),
+            lock_z: document.getElementById("ee-z").value
+          });
+          const res = await fetch(API_URL + "?" + params.toString());
+          const resultData = await res.json().catch(function(){ return null; });
+          if (!res.ok) throw new Error((resultData && resultData.error) ? resultData.error : "Server Error");
+          renderUI(resultData);
+          setStatus("Analyse geladen.", "success");
+        } catch(e) {
+          console.error(e);
+          setStatus("Fehler: " + e.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.innerText = "Adaptive Analyse starten";
+        }
+      }
+
+      document.getElementById("ee-run").onclick = run;
+      run();
+    })();
+  </script>
+</div>

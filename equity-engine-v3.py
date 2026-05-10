@@ -90,15 +90,17 @@ def api_v3():
             {'name': 'Long (9/12)', 'w9': 0.20, 'w12': 0.80},
             {'name': 'Extra Long (12/18)', 'w12': 0.50, 'w18': 0.50}
         ]
+        always_long_cfg = {'name': 'Always Long (9/12)', 'w9': 0.20, 'w12': 0.80}
 
         # 3. Backtest-Loop
         start_i = np.where(prices.index >= start_date)[0][0]
         min_i = max(x_win, max(RULE_PERIODS))
         if start_i < min_i: start_i = min_i
         
-        res_rets, acwi_rets, dates, history = [], [], [], []
+        res_rets, long_rets, acwi_rets, dates, history = [], [], [], [], []
         curr_p, alpha_lock_remaining = None, 0
         last_weights = {} 
+        last_long_weights = {}
         sector_cols = list(mapping.keys())
 
         for i in range(start_i, len(prices)-1):
@@ -142,8 +144,13 @@ def api_v3():
             turnover = sum(abs(weights.get(a, 0) - last_weights.get(a, 0)) for a in set(list(weights.keys()) + list(last_weights.keys())))
             m_cost = turnover * cost_rate
             m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in weights.items()) - m_cost
+
+            long_weights, _long_mode = select_weights_for_rule(prices, always_long_cfg, i, sector_cols, y_pa)
+            long_turnover = sum(abs(long_weights.get(a, 0) - last_long_weights.get(a, 0)) for a in set(list(long_weights.keys()) + list(last_long_weights.keys())))
+            long_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in long_weights.items()) - (long_turnover * cost_rate)
             
             res_rets.append(m_ret)
+            long_rets.append(long_m_ret)
             acwi_rets.append(rets_df["equities"].iloc[i+1])
             dates.append(prices.index[i+1])
             
@@ -156,6 +163,7 @@ def api_v3():
             })
             
             last_weights = weights.copy()
+            last_long_weights = long_weights.copy()
 
         def get_p_stats(r_list):
             r_ser = pd.Series(r_list)
@@ -171,9 +179,10 @@ def api_v3():
             "series": {
                 "dates": [d.strftime("%Y-%m-%d") for d in dates], 
                 "equity_engine": (1 + pd.Series(res_rets)).cumprod().tolist(), 
+                "always_long": (1 + pd.Series(long_rets)).cumprod().tolist(),
                 "acwi": (1 + pd.Series(acwi_rets)).cumprod().tolist()
             },
-            "performance": {"equity_engine": get_p_stats(res_rets), "acwi": get_p_stats(acwi_rets)},
+            "performance": {"equity_engine": get_p_stats(res_rets), "always_long": get_p_stats(long_rets), "acwi": get_p_stats(acwi_rets)},
             "weight_history": history
         })
     except Exception as e:

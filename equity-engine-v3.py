@@ -303,6 +303,11 @@ def build_rule_grid_configs(step):
     return configs
 
 
+def rule_name_from_ratio(ratio):
+    left, right = ratio.split("/")
+    return f"Fixed 9/12 ({int(left)}/{int(right)})"
+
+
 @app.route("/api/equity-engine-v3")
 def api_v3():
     try:
@@ -372,6 +377,7 @@ def api_v3_rule_coverage():
         cost_rate = float(request.args.get("cost_rate", 0.001))
         step = int(request.args.get("step", 10))
         max_rules = int(request.args.get("max_rules", 3))
+        target_rules = [rule_name_from_ratio(r.strip()) for r in request.args.get("target_rules", "20/80,30/70").split(",") if r.strip()]
 
         prices, rets_df, sector_cols = load_prices()
         rule_sims = {}
@@ -414,6 +420,46 @@ def api_v3_rule_coverage():
             })
         single_rule_stats.sort(key=lambda r: (r["coverage_rate"], r["avg_monthly_alpha"]), reverse=True)
 
+        target_rule_details = {}
+        for rule in target_rules:
+            if rule not in rule_sims:
+                continue
+            alphas = [rule_sims[rule]["returns"][i] - acwi_rets[i] for i in range(len(dates))]
+            misses = []
+            for idx, alpha in enumerate(alphas):
+                if alpha < 0:
+                    best_rule = max(rules, key=lambda candidate: rule_sims[candidate]["returns"][idx] - acwi_rets[idx])
+                    best_alpha = rule_sims[best_rule]["returns"][idx] - acwi_rets[idx]
+                    misses.append({
+                        "date": dates[idx].strftime("%Y-%m-%d"),
+                        "year": int(dates[idx].year),
+                        "month": int(dates[idx].month),
+                        "strategy_return": round(rule_sims[rule]["returns"][idx], 4),
+                        "acwi_return": round(acwi_rets[idx], 4),
+                        "alpha": round(alpha, 4),
+                        "best_alternative_rule": best_rule,
+                        "best_alternative_alpha": round(best_alpha, 4)
+                    })
+
+            by_year, by_month = {}, {}
+            for miss in misses:
+                by_year[miss["year"]] = by_year.get(miss["year"], 0) + 1
+                by_month[miss["month"]] = by_month.get(miss["month"], 0) + 1
+
+            target_rule_details[rule] = {
+                "weights": rule_sims[rule]["weights"],
+                "missed_months": len(misses),
+                "hit_months": len(dates) - len(misses),
+                "hit_rate": round((len(dates) - len(misses)) / len(dates), 4) if dates else 0,
+                "avg_miss_alpha": round(float(np.mean([m["alpha"] for m in misses])), 4) if misses else 0,
+                "median_miss_alpha": round(float(np.median([m["alpha"] for m in misses])), 4) if misses else 0,
+                "worst_miss_alpha": round(float(np.min([m["alpha"] for m in misses])), 4) if misses else 0,
+                "best_miss_alpha": round(float(np.max([m["alpha"] for m in misses])), 4) if misses else 0,
+                "misses_by_year": dict(sorted(by_year.items())),
+                "misses_by_calendar_month": dict(sorted(by_month.items())),
+                "misses": misses
+            }
+
         combo_stats = []
         for combo_size in range(1, min(max_rules, len(rules)) + 1):
             for combo in combinations(rules, combo_size):
@@ -438,6 +484,7 @@ def api_v3_rule_coverage():
                 "cost_rate": cost_rate,
                 "step": step,
                 "max_rules": max_rules,
+                "target_rules": target_rules,
                 "grid": "9m/12m"
             },
             "summary": {
@@ -447,6 +494,7 @@ def api_v3_rule_coverage():
                 "uncovered_months": len(uncovered)
             },
             "single_rule_stats": single_rule_stats,
+            "target_rule_details": target_rule_details,
             "best_combinations": combo_stats[:20],
             "uncovered_months": uncovered
         })

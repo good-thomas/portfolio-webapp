@@ -251,6 +251,45 @@ def build_research(result, horizons):
     return {"summary": summary, "rolling_windows": windows}
 
 
+def simulate_fixed_rule(prices, rets_df, cfg, start_date, x_win, cost_rate, hurdle_y_pm, sector_cols):
+    start_i = np.where(prices.index >= start_date)[0][0]
+    min_i = max(x_win, max(RULE_PERIODS))
+    if start_i < min_i:
+        start_i = min_i
+
+    strategy_rets, acwi_rets, dates = [], [], []
+    last_weights = {}
+    for i in range(start_i, len(prices)-1):
+        weights, _mode = select_weights_for_rule(prices, cfg, i, sector_cols, hurdle_y_pm)
+        turnover = sum(abs(weights.get(a, 0) - last_weights.get(a, 0)) for a in set(list(weights.keys()) + list(last_weights.keys())))
+        strategy_rets.append(sum(w * rets_df[a].iloc[i+1] for a, w in weights.items()) - (turnover * cost_rate))
+        acwi_rets.append(rets_df["equities"].iloc[i+1])
+        dates.append(prices.index[i+1])
+        last_weights = weights.copy()
+
+    return {"dates": dates, "returns": {"strategy": strategy_rets, "acwi": acwi_rets}}
+
+
+def rolling_alpha_summary(dates, strategy_rets, acwi_rets, horizons):
+    summary = {}
+    for horizon in horizons:
+        alphas = []
+        for start in range(0, len(dates) - horizon + 1):
+            end = start + horizon
+            strategy_cagr = annualized_return(strategy_rets[start:end])
+            acwi_cagr = annualized_return(acwi_rets[start:end])
+            alphas.append(strategy_cagr - acwi_cagr)
+        summary[str(horizon)] = {
+            "windows": len(alphas),
+            "win_rate_vs_acwi": round(sum(1 for a in alphas if a > 0) / len(alphas), 4) if alphas else 0,
+            "avg_alpha_pa": round(float(np.mean(alphas)), 4) if alphas else 0,
+            "median_alpha_pa": round(float(np.median(alphas)), 4) if alphas else 0,
+            "worst_alpha_pa": round(float(np.min(alphas)), 4) if alphas else 0,
+            "best_alpha_pa": round(float(np.max(alphas)), 4) if alphas else 0
+        }
+    return summary
+
+
 @app.route("/api/equity-engine-v3")
 def api_v3():
     try:
@@ -260,6 +299,59 @@ def api_v3():
         z_lock = int(request.args.get("lock_z", 6))
         cost_rate = float(request.args.get("cost_rate", 0.001))
         return jsonify(backtest_response(run_backtest(start_date, x_win, y_pa, z_lock, cost_rate)))
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/equity-engine-v3/rule-grid")
+def api_v3_rule_grid():
+    try:
+        start_date = pd.to_datetime(request.args.get("start_date", "2011-01-01"))
+        x_win = int(request.args.get("opt_window_x", 36))
+        y_pa = float(request.args.get("hurdle_y_pa", 0.02)) / 12
+        cost_rate = float(request.args.get("cost_rate", 0.001))
+        horizons = [int(h) for h in request.args.get("horizons", "12,36,60,120").split(",") if h.strip()]
+        step = int(request.args.get("step", 10))
+
+        prices, rets_df, sector_cols = load_prices()
+        results = []
+        for w9_pct in range(0, 101, step):
+            w12_pct = 100 - w9_pct
+            cfg = {
+                "name": f"Fixed 9/12 ({w9_pct}/{w12_pct})",
+                "w9": w9_pct / 100,
+                "w12": w12_pct / 100
+            }
+            sim = simulate_fixed_rule(prices, rets_df, cfg, start_date, x_win, cost_rate, y_pa, sector_cols)
+            strategy_rets = sim["returns"]["strategy"]
+            acwi_rets = sim["returns"]["acwi"]
+            perf = get_p_stats(strategy_rets)
+            acwi_perf = get_p_stats(acwi_rets)
+            rolling = rolling_alpha_summary(sim["dates"], strategy_rets, acwi_rets, horizons)
+            results.append({
+                "rule": cfg["name"],
+                "weights": {"9m": cfg["w9"], "12m": cfg["w12"]},
+                "performance": {
+                    "strategy": perf,
+                    "acwi": acwi_perf,
+                    "alpha_cagr": round(perf["cagr"] - acwi_perf["cagr"], 4)
+                },
+                "rolling": rolling
+            })
+
+        results.sort(key=lambda r: (r["rolling"].get("60", {}).get("win_rate_vs_acwi", 0), r["performance"]["strategy"]["sharpe"], r["performance"]["strategy"]["cagr"]), reverse=True)
+        return jsonify({
+            "params": {
+                "start_date": start_date.strftime("%Y-%m-%d"),
+                "opt_window_x": x_win,
+                "hurdle_y_pa": round(y_pa * 12, 4),
+                "cost_rate": cost_rate,
+                "horizons": horizons,
+                "step": step,
+                "grid": "9m/12m"
+            },
+            "results": results
+        })
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 

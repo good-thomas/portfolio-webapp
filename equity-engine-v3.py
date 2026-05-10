@@ -1,6 +1,7 @@
 import math, numpy as np, pandas as pd, yfinance as yf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from itertools import combinations
 import os, traceback
 
 app = Flask(__name__)
@@ -290,6 +291,18 @@ def rolling_alpha_summary(dates, strategy_rets, acwi_rets, horizons):
     return summary
 
 
+def build_rule_grid_configs(step):
+    configs = []
+    for w9_pct in range(0, 101, step):
+        w12_pct = 100 - w9_pct
+        configs.append({
+            "name": f"Fixed 9/12 ({w9_pct}/{w12_pct})",
+            "w9": w9_pct / 100,
+            "w12": w12_pct / 100
+        })
+    return configs
+
+
 @app.route("/api/equity-engine-v3")
 def api_v3():
     try:
@@ -315,13 +328,7 @@ def api_v3_rule_grid():
 
         prices, rets_df, sector_cols = load_prices()
         results = []
-        for w9_pct in range(0, 101, step):
-            w12_pct = 100 - w9_pct
-            cfg = {
-                "name": f"Fixed 9/12 ({w9_pct}/{w12_pct})",
-                "w9": w9_pct / 100,
-                "w12": w12_pct / 100
-            }
+        for cfg in build_rule_grid_configs(step):
             sim = simulate_fixed_rule(prices, rets_df, cfg, start_date, x_win, cost_rate, y_pa, sector_cols)
             strategy_rets = sim["returns"]["strategy"]
             acwi_rets = sim["returns"]["acwi"]
@@ -351,6 +358,97 @@ def api_v3_rule_grid():
                 "grid": "9m/12m"
             },
             "results": results
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/equity-engine-v3/rule-coverage")
+def api_v3_rule_coverage():
+    try:
+        start_date = pd.to_datetime(request.args.get("start_date", "2011-01-01"))
+        x_win = int(request.args.get("opt_window_x", 36))
+        y_pa = float(request.args.get("hurdle_y_pa", 0.02)) / 12
+        cost_rate = float(request.args.get("cost_rate", 0.001))
+        step = int(request.args.get("step", 10))
+        max_rules = int(request.args.get("max_rules", 3))
+
+        prices, rets_df, sector_cols = load_prices()
+        rule_sims = {}
+        dates, acwi_rets = None, None
+        for cfg in build_rule_grid_configs(step):
+            sim = simulate_fixed_rule(prices, rets_df, cfg, start_date, x_win, cost_rate, y_pa, sector_cols)
+            dates = sim["dates"]
+            acwi_rets = sim["returns"]["acwi"]
+            rule_sims[cfg["name"]] = {
+                "weights": {"9m": cfg["w9"], "12m": cfg["w12"]},
+                "returns": sim["returns"]["strategy"]
+            }
+
+        rules = list(rule_sims.keys())
+        month_rows = []
+        for idx, date in enumerate(dates):
+            alphas = {rule: rule_sims[rule]["returns"][idx] - acwi_rets[idx] for rule in rules}
+            winners = [rule for rule, alpha in alphas.items() if alpha > 0]
+            best_rule = max(rules, key=lambda rule: alphas[rule])
+            month_rows.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "acwi_return": round(acwi_rets[idx], 4),
+                "covered_by_any_rule": bool(winners),
+                "winning_rules": winners,
+                "best_rule": best_rule,
+                "best_alpha": round(alphas[best_rule], 4)
+            })
+
+        uncovered = [row for row in month_rows if not row["covered_by_any_rule"]]
+        single_rule_stats = []
+        for rule in rules:
+            alphas = [rule_sims[rule]["returns"][i] - acwi_rets[i] for i in range(len(dates))]
+            single_rule_stats.append({
+                "rule": rule,
+                "weights": rule_sims[rule]["weights"],
+                "months_beating_acwi": sum(1 for a in alphas if a > 0),
+                "coverage_rate": round(sum(1 for a in alphas if a > 0) / len(alphas), 4) if alphas else 0,
+                "avg_monthly_alpha": round(float(np.mean(alphas)), 4) if alphas else 0,
+                "worst_monthly_alpha": round(float(np.min(alphas)), 4) if alphas else 0
+            })
+        single_rule_stats.sort(key=lambda r: (r["coverage_rate"], r["avg_monthly_alpha"]), reverse=True)
+
+        combo_stats = []
+        for combo_size in range(1, min(max_rules, len(rules)) + 1):
+            for combo in combinations(rules, combo_size):
+                best_combo_alphas = [
+                    max(rule_sims[rule]["returns"][i] - acwi_rets[i] for rule in combo)
+                    for i in range(len(dates))
+                ]
+                combo_stats.append({
+                    "rules": list(combo),
+                    "months_beating_acwi": sum(1 for a in best_combo_alphas if a > 0),
+                    "coverage_rate": round(sum(1 for a in best_combo_alphas if a > 0) / len(best_combo_alphas), 4) if best_combo_alphas else 0,
+                    "avg_monthly_alpha": round(float(np.mean(best_combo_alphas)), 4) if best_combo_alphas else 0,
+                    "worst_monthly_alpha": round(float(np.min(best_combo_alphas)), 4) if best_combo_alphas else 0
+                })
+        combo_stats.sort(key=lambda r: (r["coverage_rate"], r["avg_monthly_alpha"]), reverse=True)
+
+        return jsonify({
+            "params": {
+                "start_date": start_date.strftime("%Y-%m-%d"),
+                "opt_window_x": x_win,
+                "hurdle_y_pa": round(y_pa * 12, 4),
+                "cost_rate": cost_rate,
+                "step": step,
+                "max_rules": max_rules,
+                "grid": "9m/12m"
+            },
+            "summary": {
+                "months": len(month_rows),
+                "covered_by_any_rule": len(month_rows) - len(uncovered),
+                "any_rule_coverage_rate": round((len(month_rows) - len(uncovered)) / len(month_rows), 4) if month_rows else 0,
+                "uncovered_months": len(uncovered)
+            },
+            "single_rule_stats": single_rule_stats,
+            "best_combinations": combo_stats[:20],
+            "uncovered_months": uncovered
         })
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500

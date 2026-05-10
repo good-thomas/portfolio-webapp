@@ -128,8 +128,8 @@
             labels: data.series.dates,
             datasets: [
               { label: "Dynamisch", data: data.series.equity_engine, borderColor: "#326eaa", borderWidth: 2, pointRadius: 0 },
-              { label: "Fixed 20/80", data: data.series.fixed_20_80, borderColor: "#7a4fb3", borderWidth: 2, pointRadius: 0 },
               { label: "Fixed 30/70", data: data.series.fixed_30_70, borderColor: "#d58a24", borderWidth: 2, pointRadius: 0 },
+              { label: "Gated 30/70", data: data.series.gated_30_70, borderColor: "#7a4fb3", borderWidth: 2, pointRadius: 0 },
               { label: "ACWI", data: data.series.acwi, borderColor: "#111", borderWidth: 1, pointRadius: 0, borderDash: [5, 5] }
             ]
           },
@@ -146,10 +146,10 @@
         if (data.performance) {
           const p = data.performance;
           document.getElementById("ee-stats").innerHTML = "<table>" +
-            "<tr><th></th><th>Dynamisch</th><th>20/80</th><th>30/70</th><th>ACWI</th></tr>" +
-            '<tr><td>CAGR</td><td class="pos">' + (p.equity_engine.cagr * 100).toFixed(1) + "%</td><td>" + (p.fixed_20_80.cagr * 100).toFixed(1) + "%</td><td>" + (p.fixed_30_70.cagr * 100).toFixed(1) + "%</td><td>" + (p.acwi.cagr * 100).toFixed(1) + "%</td></tr>" +
-            '<tr><td>MaxDD</td><td class="neg">' + (p.equity_engine.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.fixed_20_80.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.fixed_30_70.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.acwi.max_drawdown * 100).toFixed(1) + "%</td></tr>" +
-            "<tr><td>Sharpe</td><td>" + p.equity_engine.sharpe.toFixed(2) + "</td><td>" + p.fixed_20_80.sharpe.toFixed(2) + "</td><td>" + p.fixed_30_70.sharpe.toFixed(2) + "</td><td>" + p.acwi.sharpe.toFixed(2) + "</td></tr></table>";
+            "<tr><th></th><th>Dynamisch</th><th>30/70</th><th>Gated 30/70</th><th>ACWI</th></tr>" +
+            '<tr><td>CAGR</td><td class="pos">' + (p.equity_engine.cagr * 100).toFixed(1) + "%</td><td>" + (p.fixed_30_70.cagr * 100).toFixed(1) + "%</td><td>" + (p.gated_30_70.cagr * 100).toFixed(1) + "%</td><td>" + (p.acwi.cagr * 100).toFixed(1) + "%</td></tr>" +
+            '<tr><td>MaxDD</td><td class="neg">' + (p.equity_engine.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.fixed_30_70.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.gated_30_70.max_drawdown * 100).toFixed(1) + '%</td><td class="neg">' + (p.acwi.max_drawdown * 100).toFixed(1) + "%</td></tr>" +
+            "<tr><td>Sharpe</td><td>" + p.equity_engine.sharpe.toFixed(2) + "</td><td>" + p.fixed_30_70.sharpe.toFixed(2) + "</td><td>" + p.gated_30_70.sharpe.toFixed(2) + "</td><td>" + p.acwi.sharpe.toFixed(2) + "</td></tr></table>";
         }
 
         renderPerformanceMatrix(data.series.dates, data.series.equity_engine, data.series.acwi);

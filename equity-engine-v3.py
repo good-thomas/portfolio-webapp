@@ -111,11 +111,12 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
     if start_i < min_i:
         start_i = min_i
 
-    res_rets, fixed_20_80_rets, fixed_30_70_rets, acwi_rets, dates, history = [], [], [], [], [], []
+    res_rets, fixed_20_80_rets, fixed_30_70_rets, gated_30_70_rets, acwi_rets, dates, history = [], [], [], [], [], [], []
     curr_p, alpha_lock_remaining = None, 0
     last_weights = {}
     last_fixed_20_80_weights = {}
     last_fixed_30_70_weights = {}
+    last_gated_30_70_weights = {}
 
     for i in range(start_i, len(prices)-1):
         window_start = i - x_win
@@ -165,9 +166,22 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
         fixed_30_70_turnover = sum(abs(fixed_30_70_weights.get(a, 0) - last_fixed_30_70_weights.get(a, 0)) for a in set(list(fixed_30_70_weights.keys()) + list(last_fixed_30_70_weights.keys())))
         fixed_30_70_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_30_70_weights.items()) - (fixed_30_70_turnover * cost_rate)
 
+        fixed_30_70_window_return = simulate_rule_window(prices, rets_df, fixed_30_70_cfg, window_start, i, sector_cols, y_pa)
+        acwi_window_return = cumulative_return(rets_df["equities"].iloc[window_start + 1:i + 1])
+        cash_window_return = cumulative_return(rets_df["cash"].iloc[window_start + 1:i + 1])
+        if fixed_30_70_window_return > acwi_window_return and fixed_30_70_window_return > cash_window_return:
+            gated_30_70_weights = fixed_30_70_weights
+        elif acwi_window_return > cash_window_return:
+            gated_30_70_weights = {"equities": 1.0}
+        else:
+            gated_30_70_weights = {"cash": 1.0}
+        gated_30_70_turnover = sum(abs(gated_30_70_weights.get(a, 0) - last_gated_30_70_weights.get(a, 0)) for a in set(list(gated_30_70_weights.keys()) + list(last_gated_30_70_weights.keys())))
+        gated_30_70_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in gated_30_70_weights.items()) - (gated_30_70_turnover * cost_rate)
+
         res_rets.append(m_ret)
         fixed_20_80_rets.append(fixed_20_80_m_ret)
         fixed_30_70_rets.append(fixed_30_70_m_ret)
+        gated_30_70_rets.append(gated_30_70_m_ret)
         acwi_rets.append(rets_df["equities"].iloc[i+1])
         dates.append(prices.index[i+1])
 
@@ -182,6 +196,7 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
         last_weights = weights.copy()
         last_fixed_20_80_weights = fixed_20_80_weights.copy()
         last_fixed_30_70_weights = fixed_30_70_weights.copy()
+        last_gated_30_70_weights = gated_30_70_weights.copy()
 
     return {
         "dates": dates,
@@ -190,6 +205,7 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
             "always_long": fixed_20_80_rets,
             "fixed_20_80": fixed_20_80_rets,
             "fixed_30_70": fixed_30_70_rets,
+            "gated_30_70": gated_30_70_rets,
             "acwi": acwi_rets
         },
         "weight_history": history
@@ -204,6 +220,7 @@ def backtest_response(result):
             "always_long": (1 + pd.Series(result["returns"]["always_long"])).cumprod().tolist(),
             "fixed_20_80": (1 + pd.Series(result["returns"]["fixed_20_80"])).cumprod().tolist(),
             "fixed_30_70": (1 + pd.Series(result["returns"]["fixed_30_70"])).cumprod().tolist(),
+            "gated_30_70": (1 + pd.Series(result["returns"]["gated_30_70"])).cumprod().tolist(),
             "acwi": (1 + pd.Series(result["returns"]["acwi"])).cumprod().tolist()
         },
         "performance": {
@@ -211,6 +228,7 @@ def backtest_response(result):
             "always_long": get_p_stats(result["returns"]["always_long"]),
             "fixed_20_80": get_p_stats(result["returns"]["fixed_20_80"]),
             "fixed_30_70": get_p_stats(result["returns"]["fixed_30_70"]),
+            "gated_30_70": get_p_stats(result["returns"]["gated_30_70"]),
             "acwi": get_p_stats(result["returns"]["acwi"])
         },
         "weight_history": result["weight_history"]

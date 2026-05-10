@@ -86,14 +86,9 @@ def api_v3():
         
         # Regeln: unterschiedliche Gewichtung der 3/6/9/12-Monatsperformance
         configs = [
-            {'name': '3M', 'w3': 1.0},
-            {'name': '6M', 'w6': 1.0},
-            {'name': '9M', 'w9': 1.0},
-            {'name': '12M', 'w12': 1.0},
-            {'name': 'Balanced (3/6/9/12)', 'w3': 0.25, 'w6': 0.25, 'w9': 0.25, 'w12': 0.25},
-            {'name': 'Medium (3/6/9)', 'w3': 0.30, 'w6': 0.40, 'w9': 0.30},
-            {'name': 'Long (6/9/12)', 'w6': 0.20, 'w9': 0.30, 'w12': 0.50},
-            {'name': 'Agile (3/6/9/12)', 'w3': 0.40, 'w6': 0.30, 'w9': 0.20, 'w12': 0.10}
+            {'name': 'Agile (3/6)', 'w3': 0.80, 'w6': 0.20},
+            {'name': 'Medium (6/9)', 'w6': 0.50, 'w9': 0.50},
+            {'name': 'Long (9/12)', 'w9': 0.20, 'w12': 0.80}
         ]
 
         # 3. Backtest-Loop

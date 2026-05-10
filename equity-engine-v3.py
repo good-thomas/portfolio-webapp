@@ -6,7 +6,7 @@ import os, traceback
 app = Flask(__name__)
 CORS(app)
 
-# --- MASTER ENGINE V3.5.2 (Rule-Logging & Score Weighting) ---
+# --- MASTER ENGINE V3.6.0 (Walk-forward rule selection) ---
 
 TICKERS_V3 = {
     "equities": "ACWI", "cash": "BIL",
@@ -18,6 +18,47 @@ TICKERS_V3 = {
         "uranium": "URA", "chem": "XLB", "utilities": "XLU", "real_estate": "XLRE"
     }
 }
+
+RULE_PERIODS = (3, 6, 9, 12)
+
+
+def score_asset(prices, cfg, idx, col):
+    p_vec = prices[col]
+    score = 0.0
+    for period in RULE_PERIODS:
+        weight = cfg.get(f"w{period}", 0)
+        if weight:
+            score += weight * (p_vec.iloc[idx] / p_vec.iloc[idx - period] - 1)
+    return score
+
+
+def select_weights_for_rule(prices, cfg, idx, sector_cols, hurdle_y_pm):
+    scores = {s: score_asset(prices, cfg, idx, s) for s in sector_cols}
+    eq_s = score_asset(prices, cfg, idx, "equities")
+    cash_s = score_asset(prices, cfg, idx, "cash")
+    qual = {s: sc for s, sc in scores.items() if sc > (eq_s + hurdle_y_pm) and sc > cash_s}
+
+    if qual:
+        top_keys = sorted(qual, key=qual.get, reverse=True)[:5]
+        sum_scores = sum(qual[k] for k in top_keys)
+        weights = {k: round(qual[k] / sum_scores, 4) for k in top_keys}
+        return weights, "ALPHA"
+    if eq_s > cash_s:
+        return {"equities": 1.0}, "BETA"
+    return {"cash": 1.0}, "CASH"
+
+
+def cumulative_return(rets):
+    return float((1 + pd.Series(rets)).prod() - 1)
+
+
+def simulate_rule_window(prices, rets_df, cfg, start_idx, end_idx, sector_cols, hurdle_y_pm):
+    rule_rets = []
+    for idx in range(start_idx, end_idx):
+        weights, _mode = select_weights_for_rule(prices, cfg, idx, sector_cols, hurdle_y_pm)
+        rule_rets.append(sum(w * rets_df[a].iloc[idx + 1] for a, w in weights.items()))
+    return cumulative_return(rule_rets)
+
 
 @app.route("/api/equity-engine-v3")
 def api_v3():
@@ -43,58 +84,64 @@ def api_v3():
         prices = df.rename(columns=inv_map)[[c for c in inv_map.values() if c in df.rename(columns=inv_map).columns]]
         rets_df = prices.pct_change().fillna(0)
         
-        # NEU: Regeln mit Namen versehen für das Logging
+        # Regeln: unterschiedliche Gewichtung der 3/6/9/12-Monatsperformance
         configs = [
-            {'name': 'Long (6/12)', 'w6': 0.2, 'w12': 0.8}, 
-            {'name': 'Balanced (6/12)', 'w6': 0.5, 'w12': 0.5},
-            {'name': 'Medium (3/6/12)', 'w3': 0.3, 'w6': 0.4, 'w12': 0.3}, 
-            {'name': 'Agile (1/3/6/12)', 'w1': 0.2, 'w3': 0.3, 'w6': 0.3, 'w12': 0.2}
+            {'name': '3M', 'w3': 1.0},
+            {'name': '6M', 'w6': 1.0},
+            {'name': '9M', 'w9': 1.0},
+            {'name': '12M', 'w12': 1.0},
+            {'name': 'Balanced (3/6/9/12)', 'w3': 0.25, 'w6': 0.25, 'w9': 0.25, 'w12': 0.25},
+            {'name': 'Medium (3/6/9)', 'w3': 0.30, 'w6': 0.40, 'w9': 0.30},
+            {'name': 'Long (6/9/12)', 'w6': 0.20, 'w9': 0.30, 'w12': 0.50},
+            {'name': 'Agile (3/6/9/12)', 'w3': 0.40, 'w6': 0.30, 'w9': 0.20, 'w12': 0.10}
         ]
 
         # 3. Backtest-Loop
         start_i = np.where(prices.index >= start_date)[0][0]
-        if start_i < x_win: start_i = x_win
+        min_i = max(x_win, max(RULE_PERIODS))
+        if start_i < min_i: start_i = min_i
         
         res_rets, acwi_rets, dates, history = [], [], [], []
-        curr_p, mode, months_active = configs[0], "INIT", 0
+        curr_p, alpha_lock_remaining = None, 0
         last_weights = {} 
         sector_cols = list(mapping.keys())
 
         for i in range(start_i, len(prices)-1):
-            # Regel-Check
-            if months_active >= z_lock or mode != "ALPHA":
-                best_cfg = configs[0]
-                window_rets = rets_df.iloc[i-x_win:i]
-                for cfg in configs:
-                    s_score = (window_rets * cfg.get('w1', 0) + window_rets.rolling(3).mean() * cfg.get('w3', 0) + 
-                               window_rets.rolling(6).mean() * cfg.get('w6', 0) + window_rets.rolling(12).mean() * cfg.get('w12', 0)).iloc[-1]
-                    if s_score.max() > 0: 
-                        best_cfg = cfg
-                        break 
-                curr_p = best_cfg
-                months_active = 0
+            window_start = i - x_win
+            rule_test = None
 
-            # Signal Check
-            def get_s(col):
-                p_vec = prices[col]
-                return (curr_p.get('w1',0)*(p_vec.iloc[i]/p_vec.iloc[i-1]-1) + 
-                        curr_p.get('w6',0)*(p_vec.iloc[i]/p_vec.iloc[i-6]-1) + 
-                        curr_p.get('w12',0)*(p_vec.iloc[i]/p_vec.iloc[i-12]-1))
+            if alpha_lock_remaining <= 0:
+                rule_results = [
+                    {
+                        "cfg": cfg,
+                        "return": simulate_rule_window(prices, rets_df, cfg, window_start, i, sector_cols, y_pa)
+                    }
+                    for cfg in configs
+                ]
+                best_rule = max(rule_results, key=lambda r: r["return"])
+                acwi_window_return = cumulative_return(rets_df["equities"].iloc[window_start + 1:i + 1])
+                cash_window_return = cumulative_return(rets_df["cash"].iloc[window_start + 1:i + 1])
+                rule_test = {
+                    "best_rule": best_rule["cfg"]["name"],
+                    "best_rule_return": round(best_rule["return"], 4),
+                    "acwi_return": round(acwi_window_return, 4),
+                    "cash_return": round(cash_window_return, 4)
+                }
 
-            scores = {s: get_s(s) for s in sector_cols}
-            eq_s, cash_s = get_s("equities"), get_s("cash")
-            qual = {s: sc for s, sc in scores.items() if sc > (eq_s + y_pa) and sc > cash_s}
-            
-            weights = {}
-            if qual:
-                top_keys = sorted(qual, key=qual.get, reverse=True)[:5]
-                sum_scores = sum(qual[k] for k in top_keys)
-                for k in top_keys: weights[k] = round(qual[k] / sum_scores, 4)
-                mode = "ALPHA"
-            elif eq_s > cash_s:
-                weights["equities"] = 1.0; mode = "BETA"
+                if best_rule["return"] > acwi_window_return and best_rule["return"] > cash_window_return:
+                    curr_p = best_rule["cfg"]
+                    alpha_lock_remaining = z_lock
+                else:
+                    curr_p = None
+
+            if curr_p is not None:
+                weights, mode = select_weights_for_rule(prices, curr_p, i, sector_cols, y_pa)
+                rule_name = curr_p["name"]
+                alpha_lock_remaining -= 1
+            elif rule_test and rule_test["acwi_return"] > rule_test["cash_return"]:
+                weights, mode, rule_name = {"equities": 1.0}, "BETA", "N/A"
             else:
-                weights["cash"] = 1.0; mode = "CASH"
+                weights, mode, rule_name = {"cash": 1.0}, "CASH", "N/A"
 
             # Turnover & Kosten
             turnover = sum(abs(weights.get(a, 0) - last_weights.get(a, 0)) for a in set(list(weights.keys()) + list(last_weights.keys())))
@@ -105,16 +152,15 @@ def api_v3():
             acwi_rets.append(rets_df["equities"].iloc[i+1])
             dates.append(prices.index[i+1])
             
-            # NEU: 'rule' wird hier mitgeloggt
             history.append({
                 "date": prices.index[i+1].strftime("%Y-%m-%d"), 
                 "weights": weights, 
                 "mode": mode,
-                "rule": curr_p['name'] if mode == "ALPHA" else "N/A"
+                "rule": rule_name,
+                "rule_test": rule_test
             })
             
             last_weights = weights.copy()
-            months_active += 1
 
         def get_p_stats(r_list):
             r_ser = pd.Series(r_list)

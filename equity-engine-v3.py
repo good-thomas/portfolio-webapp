@@ -19,7 +19,9 @@ TICKERS_V3 = {
         "uranium": "URA", "chem": "XLB", "utilities": "XLU", "real_estate": "XLRE",
         "copper_miners": "COPX", "gold_miners": "GDX", "us_infra": "PAVE",
         "consumer_discretionary": "XLY", "emerging_markets": "EEM",
-        "europe": "VGK"
+        "europe": "VGK", "rare_earths": "REMX", "lithium_battery": "LIT",
+        "robotics_ai": "BOTZ", "solar": "TAN", "natural_resources": "GUNR",
+        "semiconductors": "SOXX", "gold": "GLD"
     }
 }
 

@@ -16,7 +16,9 @@ TICKERS_V3 = {
         "semis": "SMH", "cyber": "HACK", "media": "XLC", "biotech": "XBI", 
         "pharma": "XLV", "medtech": "IHI", "banks": "KBE", "brokers": "IAI", 
         "retail": "XRT", "staples": "XLP", "metals": "XME", "energy": "XLE", 
-        "uranium": "URA", "chem": "XLB", "utilities": "XLU", "real_estate": "XLRE"
+        "uranium": "URA", "chem": "XLB", "utilities": "XLU", "real_estate": "XLRE",
+        "copper_miners": "COPX", "gold_miners": "GDX", "us_infra": "PAVE",
+        "consumer_discretionary": "XLY"
     }
 }
 
@@ -29,7 +31,11 @@ def score_asset(prices, cfg, idx, col):
     for period in RULE_PERIODS:
         weight = cfg.get(f"w{period}", 0)
         if weight:
-            score += weight * (p_vec.iloc[idx] / p_vec.iloc[idx - period] - 1)
+            current = p_vec.iloc[idx]
+            previous = p_vec.iloc[idx - period]
+            if not np.isfinite(current) or not np.isfinite(previous) or previous <= 0:
+                return -np.inf
+            score += weight * (current / previous - 1)
     return score
 
 
@@ -42,7 +48,7 @@ def select_weights_for_rule(prices, cfg, idx, sector_cols, hurdle_y_pm):
     if qual:
         top_keys = sorted(qual, key=qual.get, reverse=True)[:5]
         sum_scores = sum(qual[k] for k in top_keys)
-        weights = {k: round(qual[k] / sum_scores, 4) for k in top_keys}
+        weights = {k: float(round(qual[k] / sum_scores, 4)) for k in top_keys}
         return weights, "ALPHA"
     if eq_s > cash_s:
         return {"equities": 1.0}, "BETA"
@@ -68,16 +74,25 @@ def load_prices():
     raw = yf.download(all_t + ["SHV", "XLK", "XLI"], start="2000-01-01", auto_adjust=True, progress=False)["Close"]
     df = raw.resample("ME").last().ffill()
 
-    if "BIL" in df and "SHV" in df:
-        df["BIL"] = df["BIL"].fillna(df["SHV"] * (df["BIL"].dropna().iloc[0] / df["SHV"].loc[df["BIL"].dropna().index[0]]))
-    if "XLC" in df and "XLK" in df:
-        df["XLC"] = df["XLC"].fillna(df["XLK"] * (df["XLC"].dropna().iloc[0] / df["XLK"].loc[df["XLK"].dropna().index[0]]))
+    if "BIL" in df and "SHV" in df and not df["BIL"].dropna().empty and not df["SHV"].dropna().empty:
+        first_bil_idx = df["BIL"].dropna().index[0]
+        if first_bil_idx in df["SHV"].dropna().index:
+            df["BIL"] = df["BIL"].fillna(df["SHV"] * (df["BIL"].dropna().iloc[0] / df["SHV"].loc[first_bil_idx]))
+    if "XLC" in df and "XLK" in df and not df["XLC"].dropna().empty and not df["XLK"].dropna().empty:
+        first_xlc_idx = df["XLC"].dropna().index[0]
+        if first_xlc_idx in df["XLK"].dropna().index:
+            df["XLC"] = df["XLC"].fillna(df["XLK"] * (df["XLC"].dropna().iloc[0] / df["XLK"].loc[first_xlc_idx]))
 
     inv_map = {v: k for k, v in mapping.items()}
     inv_map[TICKERS_V3["equities"]] = "equities"
     inv_map[TICKERS_V3["cash"]] = "cash"
     prices = df.rename(columns=inv_map)[[c for c in inv_map.values() if c in df.rename(columns=inv_map).columns]]
-    return prices, prices.pct_change().fillna(0), list(mapping.keys())
+    if "equities" not in prices or prices["equities"].dropna().empty:
+        raise ValueError("ACWI data could not be loaded.")
+    if "cash" not in prices or prices["cash"].dropna().empty:
+        raise ValueError("BIL data could not be loaded.")
+    sector_cols = [sector for sector in mapping.keys() if sector in prices.columns]
+    return prices, prices.pct_change().fillna(0), sector_cols
 
 
 def rule_configs():
@@ -111,12 +126,12 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
     if start_i < min_i:
         start_i = min_i
 
-    res_rets, fixed_20_80_rets, fixed_30_70_rets, gated_30_70_rets, acwi_rets, dates, history = [], [], [], [], [], [], []
+    res_rets, fixed_20_80_rets, fixed_30_70_rets, acwi_rets, dates, history = [], [], [], [], [], []
+    fixed_30_70_history = []
     curr_p, alpha_lock_remaining = None, 0
     last_weights = {}
     last_fixed_20_80_weights = {}
     last_fixed_30_70_weights = {}
-    last_gated_30_70_weights = {}
 
     for i in range(start_i, len(prices)-1):
         window_start = i - x_win
@@ -166,22 +181,9 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
         fixed_30_70_turnover = sum(abs(fixed_30_70_weights.get(a, 0) - last_fixed_30_70_weights.get(a, 0)) for a in set(list(fixed_30_70_weights.keys()) + list(last_fixed_30_70_weights.keys())))
         fixed_30_70_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_30_70_weights.items()) - (fixed_30_70_turnover * cost_rate)
 
-        fixed_30_70_window_return = simulate_rule_window(prices, rets_df, fixed_30_70_cfg, window_start, i, sector_cols, y_pa)
-        acwi_window_return = cumulative_return(rets_df["equities"].iloc[window_start + 1:i + 1])
-        cash_window_return = cumulative_return(rets_df["cash"].iloc[window_start + 1:i + 1])
-        if fixed_30_70_window_return > acwi_window_return and fixed_30_70_window_return > cash_window_return:
-            gated_30_70_weights = fixed_30_70_weights
-        elif acwi_window_return > cash_window_return:
-            gated_30_70_weights = {"equities": 1.0}
-        else:
-            gated_30_70_weights = {"cash": 1.0}
-        gated_30_70_turnover = sum(abs(gated_30_70_weights.get(a, 0) - last_gated_30_70_weights.get(a, 0)) for a in set(list(gated_30_70_weights.keys()) + list(last_gated_30_70_weights.keys())))
-        gated_30_70_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in gated_30_70_weights.items()) - (gated_30_70_turnover * cost_rate)
-
         res_rets.append(m_ret)
         fixed_20_80_rets.append(fixed_20_80_m_ret)
         fixed_30_70_rets.append(fixed_30_70_m_ret)
-        gated_30_70_rets.append(gated_30_70_m_ret)
         acwi_rets.append(rets_df["equities"].iloc[i+1])
         dates.append(prices.index[i+1])
 
@@ -192,11 +194,16 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
             "rule": rule_name,
             "rule_test": rule_test
         })
+        fixed_30_70_history.append({
+            "date": prices.index[i+1].strftime("%Y-%m-%d"),
+            "weights": fixed_30_70_weights,
+            "mode": _fixed_30_70_mode,
+            "rule": fixed_30_70_cfg["name"]
+        })
 
         last_weights = weights.copy()
         last_fixed_20_80_weights = fixed_20_80_weights.copy()
         last_fixed_30_70_weights = fixed_30_70_weights.copy()
-        last_gated_30_70_weights = gated_30_70_weights.copy()
 
     return {
         "dates": dates,
@@ -205,10 +212,10 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
             "always_long": fixed_20_80_rets,
             "fixed_20_80": fixed_20_80_rets,
             "fixed_30_70": fixed_30_70_rets,
-            "gated_30_70": gated_30_70_rets,
             "acwi": acwi_rets
         },
-        "weight_history": history
+        "weight_history": history,
+        "fixed_30_70_history": fixed_30_70_history
     }
 
 
@@ -220,7 +227,6 @@ def backtest_response(result):
             "always_long": (1 + pd.Series(result["returns"]["always_long"])).cumprod().tolist(),
             "fixed_20_80": (1 + pd.Series(result["returns"]["fixed_20_80"])).cumprod().tolist(),
             "fixed_30_70": (1 + pd.Series(result["returns"]["fixed_30_70"])).cumprod().tolist(),
-            "gated_30_70": (1 + pd.Series(result["returns"]["gated_30_70"])).cumprod().tolist(),
             "acwi": (1 + pd.Series(result["returns"]["acwi"])).cumprod().tolist()
         },
         "performance": {
@@ -228,10 +234,10 @@ def backtest_response(result):
             "always_long": get_p_stats(result["returns"]["always_long"]),
             "fixed_20_80": get_p_stats(result["returns"]["fixed_20_80"]),
             "fixed_30_70": get_p_stats(result["returns"]["fixed_30_70"]),
-            "gated_30_70": get_p_stats(result["returns"]["gated_30_70"]),
             "acwi": get_p_stats(result["returns"]["acwi"])
         },
-        "weight_history": result["weight_history"]
+        "weight_history": result["weight_history"],
+        "fixed_30_70_history": result["fixed_30_70_history"]
     }
 
 

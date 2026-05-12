@@ -58,6 +58,101 @@ def select_weights_for_rule(prices, cfg, idx, sector_cols, hurdle_y_pm):
     return {"cash": 1.0}, "CASH"
 
 
+def frog_score_asset(prices, rets_df, cfg, idx, col, months_back=18):
+    hits, total = 0, 0
+    start = max(1, idx - months_back + 1)
+    for ret_idx in range(start, idx + 1):
+        signal_idx = ret_idx - 1
+        if signal_idx < max(RULE_PERIODS):
+            continue
+        signal_score = score_asset(prices, cfg, signal_idx, col)
+        ret = rets_df[col].iloc[ret_idx]
+        if not np.isfinite(signal_score) or not np.isfinite(ret):
+            continue
+        if signal_score > 0:
+            total += 1
+            if ret > 0:
+                hits += 1
+    return float(hits) / float(total) if total else 0.0
+
+
+def select_weights_for_rule_with_frog(prices, rets_df, cfg, idx, sector_cols, hurdle_y_pm, frog_min_score):
+    scores = {s: score_asset(prices, cfg, idx, s) for s in sector_cols}
+    frog_scores = {s: frog_score_asset(prices, rets_df, cfg, idx, s) for s in sector_cols}
+    eq_s = score_asset(prices, cfg, idx, "equities")
+    cash_s = score_asset(prices, cfg, idx, "cash")
+    qual = {
+        s: sc for s, sc in scores.items()
+        if sc > (eq_s + hurdle_y_pm) and sc > cash_s and frog_scores.get(s, 0) >= frog_min_score
+    }
+
+    if qual:
+        top_keys = sorted(qual, key=qual.get, reverse=True)[:5]
+        sum_scores = sum(qual[k] for k in top_keys)
+        if sum_scores <= 0:
+            return {"equities": 1.0}, "BETA"
+        weights = {k: float(round(qual[k] / sum_scores, 4)) for k in top_keys}
+        return weights, "FROG"
+    if eq_s > cash_s:
+        return {"equities": 1.0}, "BETA"
+    return {"cash": 1.0}, "CASH"
+
+
+def signal_return_ev(prices, rets_df, cfg, idx, col, months_back=36):
+    signal_rets = []
+    start = max(1, idx - months_back + 1)
+    for ret_idx in range(start, idx + 1):
+        signal_idx = ret_idx - 1
+        if signal_idx < max(RULE_PERIODS):
+            continue
+        signal_score = score_asset(prices, cfg, signal_idx, col)
+        ret = rets_df[col].iloc[ret_idx]
+        if np.isfinite(signal_score) and signal_score > 0 and np.isfinite(ret):
+            signal_rets.append(float(ret))
+    if not signal_rets:
+        return -np.inf
+    return float(np.mean(signal_rets))
+
+
+def ev_utility_score(prices, rets_df, cfg, idx, col):
+    momentum_score = score_asset(prices, cfg, idx, col)
+    signal_ev = signal_return_ev(prices, rets_df, cfg, idx, col)
+    if not np.isfinite(momentum_score) or momentum_score <= 0 or not np.isfinite(signal_ev):
+        return -np.inf
+    return float(momentum_score * signal_ev)
+
+
+def select_weights_for_rule_with_ev(prices, rets_df, cfg, idx, sector_cols, hurdle_y_pm, last_weights, switch_threshold):
+    momentum_scores = {s: score_asset(prices, cfg, idx, s) for s in sector_cols}
+    utility_scores = {s: ev_utility_score(prices, rets_df, cfg, idx, s) for s in sector_cols}
+    eq_s = score_asset(prices, cfg, idx, "equities")
+    cash_s = score_asset(prices, cfg, idx, "cash")
+    qual = {
+        s: utility_scores[s] for s in sector_cols
+        if momentum_scores[s] > (eq_s + hurdle_y_pm)
+        and momentum_scores[s] > cash_s
+        and utility_scores[s] > 0
+    }
+
+    if qual:
+        top_keys = sorted(qual, key=qual.get, reverse=True)[:5]
+        sum_scores = sum(qual[k] for k in top_keys)
+        candidate_weights = {k: float(round(qual[k] / sum_scores, 4)) for k in top_keys}
+        candidate_mode = "EV"
+    elif eq_s > cash_s:
+        candidate_weights, candidate_mode = {"equities": 1.0}, "BETA"
+    else:
+        candidate_weights, candidate_mode = {"cash": 1.0}, "CASH"
+
+    if last_weights:
+        candidate_ev = sum(candidate_weights.get(a, 0) * utility_scores.get(a, 0) for a in candidate_weights)
+        current_ev = sum(last_weights.get(a, 0) * utility_scores.get(a, 0) for a in last_weights)
+        if np.isfinite(candidate_ev) and np.isfinite(current_ev) and (candidate_ev - current_ev) <= switch_threshold:
+            return last_weights.copy(), "HOLD"
+
+    return candidate_weights, candidate_mode
+
+
 def cumulative_return(rets):
     return float((1 + pd.Series(rets)).prod() - 1)
 
@@ -118,7 +213,7 @@ def get_p_stats(r_list):
     return {"cagr": round(cagr, 4), "max_drawdown": round(dd, 4), "sharpe": round(cagr / vola, 4) if vola > 0 else 0}
 
 
-def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
+def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate, frog_min_score=0.5, ev_switch_threshold=0.002):
     prices, rets_df, sector_cols = load_prices()
     configs = rule_configs()
     fixed_20_80_cfg = {'name': 'Fixed 20/80 (9/12)', 'w9': 0.20, 'w12': 0.80}
@@ -129,12 +224,16 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
     if start_i < min_i:
         start_i = min_i
 
-    res_rets, fixed_20_80_rets, fixed_30_70_rets, acwi_rets, dates, history = [], [], [], [], [], []
+    res_rets, fixed_20_80_rets, fixed_30_70_rets, fixed_30_70_frog_rets, fixed_30_70_ev_rets, acwi_rets, dates, history = [], [], [], [], [], [], [], []
     fixed_30_70_history = []
+    fixed_30_70_frog_history = []
+    fixed_30_70_ev_history = []
     curr_p, alpha_lock_remaining = None, 0
     last_weights = {}
     last_fixed_20_80_weights = {}
     last_fixed_30_70_weights = {}
+    last_fixed_30_70_frog_weights = {}
+    last_fixed_30_70_ev_weights = {}
 
     for i in range(start_i, len(prices)-1):
         window_start = i - x_win
@@ -184,9 +283,19 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
         fixed_30_70_turnover = sum(abs(fixed_30_70_weights.get(a, 0) - last_fixed_30_70_weights.get(a, 0)) for a in set(list(fixed_30_70_weights.keys()) + list(last_fixed_30_70_weights.keys())))
         fixed_30_70_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_30_70_weights.items()) - (fixed_30_70_turnover * cost_rate)
 
+        fixed_30_70_frog_weights, _fixed_30_70_frog_mode = select_weights_for_rule_with_frog(prices, rets_df, fixed_30_70_cfg, i, sector_cols, y_pa, frog_min_score)
+        fixed_30_70_frog_turnover = sum(abs(fixed_30_70_frog_weights.get(a, 0) - last_fixed_30_70_frog_weights.get(a, 0)) for a in set(list(fixed_30_70_frog_weights.keys()) + list(last_fixed_30_70_frog_weights.keys())))
+        fixed_30_70_frog_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_30_70_frog_weights.items()) - (fixed_30_70_frog_turnover * cost_rate)
+
+        fixed_30_70_ev_weights, _fixed_30_70_ev_mode = select_weights_for_rule_with_ev(prices, rets_df, fixed_30_70_cfg, i, sector_cols, y_pa, last_fixed_30_70_ev_weights, ev_switch_threshold)
+        fixed_30_70_ev_turnover = sum(abs(fixed_30_70_ev_weights.get(a, 0) - last_fixed_30_70_ev_weights.get(a, 0)) for a in set(list(fixed_30_70_ev_weights.keys()) + list(last_fixed_30_70_ev_weights.keys())))
+        fixed_30_70_ev_m_ret = sum(w * rets_df[a].iloc[i+1] for a, w in fixed_30_70_ev_weights.items()) - (fixed_30_70_ev_turnover * cost_rate)
+
         res_rets.append(m_ret)
         fixed_20_80_rets.append(fixed_20_80_m_ret)
         fixed_30_70_rets.append(fixed_30_70_m_ret)
+        fixed_30_70_frog_rets.append(fixed_30_70_frog_m_ret)
+        fixed_30_70_ev_rets.append(fixed_30_70_ev_m_ret)
         acwi_rets.append(rets_df["equities"].iloc[i+1])
         dates.append(prices.index[i+1])
 
@@ -203,10 +312,24 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
             "mode": _fixed_30_70_mode,
             "rule": fixed_30_70_cfg["name"]
         })
+        fixed_30_70_frog_history.append({
+            "date": prices.index[i+1].strftime("%Y-%m-%d"),
+            "weights": fixed_30_70_frog_weights,
+            "mode": _fixed_30_70_frog_mode,
+            "rule": "Fixed 30/70 + Frosch"
+        })
+        fixed_30_70_ev_history.append({
+            "date": prices.index[i+1].strftime("%Y-%m-%d"),
+            "weights": fixed_30_70_ev_weights,
+            "mode": _fixed_30_70_ev_mode,
+            "rule": "Fixed 30/70 EV"
+        })
 
         last_weights = weights.copy()
         last_fixed_20_80_weights = fixed_20_80_weights.copy()
         last_fixed_30_70_weights = fixed_30_70_weights.copy()
+        last_fixed_30_70_frog_weights = fixed_30_70_frog_weights.copy()
+        last_fixed_30_70_ev_weights = fixed_30_70_ev_weights.copy()
 
     return {
         "dates": dates,
@@ -215,10 +338,14 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
             "always_long": fixed_20_80_rets,
             "fixed_20_80": fixed_20_80_rets,
             "fixed_30_70": fixed_30_70_rets,
+            "fixed_30_70_frog": fixed_30_70_frog_rets,
+            "fixed_30_70_ev": fixed_30_70_ev_rets,
             "acwi": acwi_rets
         },
         "weight_history": history,
-        "fixed_30_70_history": fixed_30_70_history
+        "fixed_30_70_history": fixed_30_70_history,
+        "fixed_30_70_frog_history": fixed_30_70_frog_history,
+        "fixed_30_70_ev_history": fixed_30_70_ev_history
     }
 
 
@@ -235,6 +362,8 @@ def backtest_response(result):
             "always_long": (1 + pd.Series(result["returns"]["always_long"])).cumprod().tolist(),
             "fixed_20_80": (1 + pd.Series(result["returns"]["fixed_20_80"])).cumprod().tolist(),
             "fixed_30_70": (1 + pd.Series(result["returns"]["fixed_30_70"])).cumprod().tolist(),
+            "fixed_30_70_frog": (1 + pd.Series(result["returns"]["fixed_30_70_frog"])).cumprod().tolist(),
+            "fixed_30_70_ev": (1 + pd.Series(result["returns"]["fixed_30_70_ev"])).cumprod().tolist(),
             "acwi": (1 + pd.Series(result["returns"]["acwi"])).cumprod().tolist()
         },
         "performance": {
@@ -242,10 +371,14 @@ def backtest_response(result):
             "always_long": get_p_stats(result["returns"]["always_long"]),
             "fixed_20_80": get_p_stats(result["returns"]["fixed_20_80"]),
             "fixed_30_70": get_p_stats(result["returns"]["fixed_30_70"]),
+            "fixed_30_70_frog": get_p_stats(result["returns"]["fixed_30_70_frog"]),
+            "fixed_30_70_ev": get_p_stats(result["returns"]["fixed_30_70_ev"]),
             "acwi": get_p_stats(result["returns"]["acwi"])
         },
         "weight_history": result["weight_history"],
         "fixed_30_70_history": result["fixed_30_70_history"],
+        "fixed_30_70_frog_history": result["fixed_30_70_frog_history"],
+        "fixed_30_70_ev_history": result["fixed_30_70_ev_history"],
         "asset_tickers": asset_tickers
     }
 
@@ -363,7 +496,9 @@ def api_v3():
         y_pa = float(request.args.get("hurdle_y_pa", 0.02)) / 12
         z_lock = int(request.args.get("lock_z", 6))
         cost_rate = float(request.args.get("cost_rate", 0.001))
-        return jsonify(backtest_response(run_backtest(start_date, x_win, y_pa, z_lock, cost_rate)))
+        frog_min_score = float(request.args.get("frog_min_score", 0.5))
+        ev_switch_threshold = float(request.args.get("ev_switch_threshold", 0.002))
+        return jsonify(backtest_response(run_backtest(start_date, x_win, y_pa, z_lock, cost_rate, frog_min_score, ev_switch_threshold)))
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 

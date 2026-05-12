@@ -221,6 +221,11 @@ def run_backtest(start_date, x_win, y_pa, z_lock, cost_rate):
 
 
 def backtest_response(result):
+    asset_tickers = {
+        "equities": TICKERS_V3["equities"],
+        "cash": TICKERS_V3["cash"],
+        **TICKERS_V3["sectors"]
+    }
     return {
         "series": {
             "dates": [d.strftime("%Y-%m-%d") for d in result["dates"]],
@@ -238,7 +243,8 @@ def backtest_response(result):
             "acwi": get_p_stats(result["returns"]["acwi"])
         },
         "weight_history": result["weight_history"],
-        "fixed_30_70_history": result["fixed_30_70_history"]
+        "fixed_30_70_history": result["fixed_30_70_history"],
+        "asset_tickers": asset_tickers
     }
 
 

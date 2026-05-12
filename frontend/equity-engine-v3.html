@@ -79,6 +79,11 @@
         if (!Number.isFinite(costRate) || costRate < 0) throw new Error("Kosten müssen eine positive Zahl sein.");
       }
 
+      function assetLabel(asset, tickers) {
+        const ticker = tickers && tickers[asset];
+        return ticker ? asset + " (" + ticker + ")" : asset;
+      }
+
       ["x", "y", "z"].forEach(function(s) {
         const el = document.getElementById("ee-" + s);
         if (el) el.oninput = function() {
@@ -140,7 +145,7 @@
         const lastW = fixedHistory[fixedHistory.length - 1].weights;
         let wH = "<table>";
         Object.entries(lastW).sort(function(a,b){ return b[1] - a[1]; }).forEach(function(entry) {
-          wH += "<tr><td>" + esc(entry[0]) + "</td><td>" + (entry[1] * 100).toFixed(1) + "%</td></tr>";
+          wH += "<tr><td>" + esc(assetLabel(entry[0], data.asset_tickers)) + "</td><td>" + (entry[1] * 100).toFixed(1) + "%</td></tr>";
         });
         document.getElementById("ee-weights").innerHTML = wH + "</table>";
 
@@ -158,7 +163,7 @@
         let histH = "<table><tr><th>Datum</th><th>Modus</th><th>Regel</th><th>Mix</th></tr>";
         fixedHistory.slice().reverse().slice(0, 200).forEach(function(r) {
           const tags = Object.entries(r.weights).map(function(entry) {
-            return '<span style="font-size:10px;margin-right:5px;">' + esc(entry[0]) + ":" + (entry[1] * 100).toFixed(0) + "%</span>";
+            return '<span style="font-size:10px;margin-right:5px;">' + esc(assetLabel(entry[0], data.asset_tickers)) + ": " + (entry[1] * 100).toFixed(0) + "%</span>";
           }).join("");
           histH += '<tr><td style="width:100px">' + esc(r.date) + '</td><td><span class="mode-tag">' + esc(r.mode) + '</span></td><td>' + esc(r.rule || "-") + "</td><td>" + tags + "</td></tr>";
         });

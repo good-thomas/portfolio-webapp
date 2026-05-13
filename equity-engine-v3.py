@@ -1,4 +1,4 @@
-import math, numpy as np, pandas as pd, yfinance as yf
+import json, math, time, numpy as np, pandas as pd, yfinance as yf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from itertools import combinations
@@ -26,6 +26,12 @@ TICKERS_V3 = {
 }
 
 RULE_PERIODS = (3, 6, 9, 12, 18)
+PRICE_START_DATE = "2000-01-01"
+PRICE_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+PRICE_CACHE_DIR = os.path.join(os.path.dirname(__file__), "data_cache")
+PRICE_CACHE_FILE = os.path.join(PRICE_CACHE_DIR, "equity_engine_v3_prices.pkl")
+PRICE_CACHE_META_FILE = os.path.join(PRICE_CACHE_DIR, "equity_engine_v3_prices.json")
+PRICE_FALLBACK_TICKERS = ("SHV", "XLK", "XLI")
 
 
 def score_asset(prices, cfg, idx, col):
@@ -165,11 +171,72 @@ def simulate_rule_window(prices, rets_df, cfg, start_idx, end_idx, sector_cols, 
     return cumulative_return(rule_rets)
 
 
+def read_price_cache(tickers, start, max_age_seconds=PRICE_CACHE_MAX_AGE_SECONDS):
+    if not os.path.exists(PRICE_CACHE_FILE) or not os.path.exists(PRICE_CACHE_META_FILE):
+        return None
+    try:
+        with open(PRICE_CACHE_META_FILE, "r", encoding="utf-8") as meta_file:
+            meta = json.load(meta_file)
+        if meta.get("tickers") != sorted(tickers) or meta.get("start") != start:
+            return None
+        fetched_at = float(meta.get("fetched_at", 0))
+        if max_age_seconds is not None and (time.time() - fetched_at) > max_age_seconds:
+            return None
+        prices = pd.read_pickle(PRICE_CACHE_FILE)
+        if isinstance(prices, pd.DataFrame) and not prices.empty:
+            return prices
+    except Exception as exc:
+        print(f"Price cache ignored: {exc}")
+    return None
+
+
+def write_price_cache(prices, tickers, start):
+    os.makedirs(PRICE_CACHE_DIR, exist_ok=True)
+    prices.to_pickle(PRICE_CACHE_FILE)
+    meta = {
+        "tickers": sorted(tickers),
+        "start": start,
+        "fetched_at": time.time(),
+        "max_age_days": PRICE_CACHE_MAX_AGE_SECONDS // (24 * 60 * 60),
+    }
+    with open(PRICE_CACHE_META_FILE, "w", encoding="utf-8") as meta_file:
+        json.dump(meta, meta_file, indent=2, sort_keys=True)
+
+
+def download_price_data(tickers, start):
+    raw = yf.download(tickers, start=start, auto_adjust=True, progress=False)["Close"]
+    if isinstance(raw, pd.Series):
+        raw = raw.to_frame()
+    if raw.empty:
+        raise ValueError("No price data could be loaded from yfinance.")
+    return raw
+
+
+def load_cached_price_data(tickers, start):
+    cached = read_price_cache(tickers, start)
+    if cached is not None:
+        print("Using cached price data.")
+        return cached
+
+    try:
+        fresh = download_price_data(tickers, start)
+        write_price_cache(fresh, tickers, start)
+        print("Downloaded fresh price data and updated cache.")
+        return fresh
+    except Exception:
+        stale = read_price_cache(tickers, start, max_age_seconds=None)
+        if stale is not None:
+            print("Using stale cached price data because fresh download failed.")
+            return stale
+        raise
+
+
 def load_prices():
     mapping = TICKERS_V3["sectors"]
     all_t = [TICKERS_V3["equities"], TICKERS_V3["cash"]] + list(mapping.values())
+    price_tickers = all_t + list(PRICE_FALLBACK_TICKERS)
 
-    raw = yf.download(all_t + ["SHV", "XLK", "XLI"], start="2000-01-01", auto_adjust=True, progress=False)["Close"]
+    raw = load_cached_price_data(price_tickers, PRICE_START_DATE)
     df = raw.resample("ME").last().ffill()
 
     if "BIL" in df and "SHV" in df and not df["BIL"].dropna().empty and not df["SHV"].dropna().empty:
